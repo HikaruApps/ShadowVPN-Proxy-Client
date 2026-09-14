@@ -1,0 +1,8 @@
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+*.log
+bin/shadowvpn-core.exe
+
+vpn-desktop-app*.zip
+bin/shadowvpn-core.exe

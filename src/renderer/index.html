@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>ShadowVPN</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <section class="welcome" id="welcomeScreen" aria-labelledby="welcomeTitle">
+    <div class="welcome-brand">SHADOW<span>VPN</span></div>
+    <div class="welcome-content">
+      <img class="welcome-logo" src="assets/fox.png" alt="Логотип ShadowVPN" />
+      <h1 id="welcomeTitle">Добавьте <span>подписку</span></h1>
+      <p class="welcome-description">Вставьте ссылку на подписку, чтобы продолжить</p>
+      <form id="subscriptionForm" novalidate>
+        <label class="sr-only" for="subscriptionUrl">Ссылка на подписку</label>
+        <input id="subscriptionUrl" type="url" placeholder="https://cloud.example.com/…" autocomplete="off" spellcheck="false" aria-describedby="subscriptionError" required />
+        <p id="subscriptionError" class="form-error" role="alert"></p>
+        <button class="subscription-submit" type="submit">Добавить подписку</button>
+      </form>
+      <button class="subscription-help" id="subscriptionHelp" type="button">Где взять ссылку?</button>
+      <p class="help-text" id="subscriptionHint" hidden>Скопируйте ссылку на подписку из личного кабинета или бота вашего VPN-сервиса.</p>
+    </div>
+  </section>
+  <div class="app" id="dashboard" hidden>
+    <header class="topbar">
+      <div class="wordmark">SHADOW<span class="wordmark-accent">VPN</span></div>
+      <div class="topbar-actions">
+        <div class="menu-anchor">
+          <button class="icon-btn" id="menuBtn" aria-label="Открыть меню" title="Меню" aria-expanded="false" aria-controls="appMenu">
+            <svg viewBox="0 0 24 24" width="18" height="18">
+              <path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <div class="app-menu" id="appMenu" role="menu" hidden>
+            <button class="menu-item" id="logsMenuItem" type="button" role="menuitem">
+              <span class="menu-item-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="m8 9 3 3-3 3m5 0h3M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/></svg>
+              </span>
+              <span class="menu-item-copy"><strong>Логи</strong><small>Диагностика Xray и TUN</small></span>
+            </button>
+            <button class="menu-item" id="syncSubscriptionBtn" type="button" role="menuitem">
+              <span class="menu-item-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M20 7h-5V2m4.1 5A8 8 0 1 0 20 15m-1-8-4.2-4.2M4 17h5v5m-4.1-5A8 8 0 0 0 20 9M5 17l4.2 4.2"/></svg>
+              </span>
+              <span class="menu-item-copy"><strong>Синхронизировать подписку</strong><small>Обновить серверы из API</small></span>
+            </button>
+            <button class="menu-item" id="settingsMenuItem" type="button" role="menuitem">
+              <span class="menu-item-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Zm7-3.2 2-1.1-2-3.5-2.1.7a7 7 0 0 0-1.3-.8L15.2 5h-4l-.5 2.3a7 7 0 0 0-1.3.8l-2.1-.7-2 3.5L7.2 12a7 7 0 0 0 0 1.6l-1.9 1.1 2 3.5 2.1-.7a7 7 0 0 0 1.3.8l.5 2.3h4l.5-2.3a7 7 0 0 0 1.3-.8l2.1.7 2-3.5-2-1.1A7 7 0 0 0 19 12Z"/></svg>
+              </span>
+              <span class="menu-item-copy"><strong>Настройки</strong><small>DNS и параметры подключения</small></span>
+            </button>
+            <div class="menu-separator" role="separator"></div>
+            <button class="menu-item compact" id="changeSubscriptionBtn" type="button" role="menuitem">
+              <span class="menu-item-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>
+              </span>
+              <span class="menu-item-copy"><strong>Изменить ссылку</strong></span>
+            </button>
+          </div>
+        </div>
+        <button class="pill-btn" id="regionBtn">RU</button>
+      </div>
+    </header>
+
+    <section class="servers">
+      <div class="servers-title-row">
+        <h2 class="servers-heading">Все серверы</h2>
+        <div class="server-list-actions">
+          <div class="sort-anchor">
+            <button class="ping-btn" id="sortBtn" type="button" aria-label="Сортировка серверов" title="Сортировка серверов" aria-expanded="false" aria-controls="sortMenu">
+              <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                <path d="M8 6h11M8 12h8M8 18h5M4 5v14m0 0-2.2-2.2M4 19l2.2-2.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <div class="sort-menu" id="sortMenu" role="menu" hidden>
+              <button type="button" role="menuitemradio" data-sort-mode="alphabetical"><span>По алфавиту</span><small>А–Я · A–Z</small><i aria-hidden="true">✓</i></button>
+              <button type="button" role="menuitemradio" data-sort-mode="subscription"><span>Как в подписке</span><small>Исходный порядок</small><i aria-hidden="true">✓</i></button>
+              <button type="button" role="menuitemradio" data-sort-mode="latency"><span>По задержке</span><small>Минимальный пинг</small><i aria-hidden="true">✓</i></button>
+            </div>
+          </div>
+          <button class="ping-btn" id="pingBtn" type="button" aria-label="Измерить TCP-пинг серверов" title="Измерить TCP-пинг">
+            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+              <path d="M20 11a8 8 0 1 0-2.35 5.65M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <p class="demo-note">TUN · Windows</p>
+      <div class="server-list" id="serverList"></div>
+    </section>
+
+    <main class="connect-stage">
+      <button class="power-orb" id="powerBtn" aria-pressed="false">
+        <span class="power-orb-glow"></span>
+        <svg viewBox="0 0 24 24" width="64" height="64" class="power-icon">
+          <path d="M12 3v8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M6.5 6.5a7 7 0 1 0 11 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+        </svg>
+      </button>
+      <div class="connection-copy">
+        <p class="connect-status" id="statusText">Нажмите, чтобы подключиться</p>
+        <div class="connected-location" id="connectedLocation" hidden aria-live="polite">
+          <span class="connected-location-flag" id="connectedLocationFlag" aria-hidden="true"></span>
+          <span class="connected-location-name" id="connectedLocationName"></span>
+        </div>
+        <div class="connection-details" id="connectionDetails" aria-live="polite">
+          <span class="privacy-dot" aria-hidden="true"></span>
+          <span class="ip-label" id="ipLabel">Ваш IP</span>
+          <span class="ip-value" id="ipValue">Определяем…</span>
+          <span class="connection-divider" id="connectionDivider" hidden>·</span>
+          <span class="connection-duration" id="connectionDuration" hidden>
+            Сеанс <span id="connectionTime">00:00:00</span>
+          </span>
+        </div>
+      </div>
+    </main>
+
+
+  </div>
+
+  <div class="settings-overlay" id="settingsOverlay" hidden>
+    <section class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <header class="settings-header">
+        <div>
+          <h2 id="settingsTitle">Настройки</h2>
+          <p>Параметры подключения ShadowVPN</p>
+        </div>
+        <button class="logs-close" id="closeSettingsBtn" type="button" aria-label="Закрыть настройки">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+        </button>
+      </header>
+      <div class="settings-body">
+        <p class="settings-section-title">Сеть</p>
+        <label class="setting-card" for="dnsSelect">
+          <span class="setting-copy">
+            <strong>DNS внутри VPN</strong>
+            <small id="dnsDescription">Используется после подключения к туннелю</small>
+          </span>
+          <span class="select-shell">
+            <select id="dnsSelect" aria-label="DNS внутри VPN"></select>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
+          </span>
+        </label>
+        <div class="custom-dns" id="customDnsFields" hidden>
+          <label for="customDnsInput">DNS IP-адреса</label>
+          <input id="customDnsInput" type="text" maxlength="200" autocomplete="off" spellcheck="false" placeholder="Например: 1.1.1.1, 2606:4700:4700::1111" aria-describedby="customDnsError" />
+          <p id="customDnsError" class="setting-error" role="alert"></p>
+        </div>
+        <label class="setting-card setting-toggle" for="fragmentationToggle">
+          <span class="setting-copy">
+            <strong>Фрагментация TLS</strong>
+            <small>Делит ClientHello на небольшие части для обхода DPI</small>
+          </span>
+          <input class="sr-only" id="fragmentationToggle" type="checkbox" />
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+        </label>
+        <label class="setting-card setting-toggle" for="killSwitchToggle">
+          <span class="setting-copy">
+            <strong>Kill Switch</strong>
+            <small>Блокирует прямой интернет при обрыве VPN</small>
+          </span>
+          <input class="sr-only" id="killSwitchToggle" type="checkbox" />
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+        </label>
+        <p class="settings-note">Изменение применится при следующем подключении. Системный DNS Windows не затрагивается.</p>
+      </div>
+    </section>
+  </div>
+
+  <div class="logs-overlay" id="logsOverlay" hidden>
+    <section class="logs-panel" role="dialog" aria-modal="true" aria-labelledby="logsTitle">
+      <header class="logs-header">
+        <div>
+          <h2 id="logsTitle">Логи подключения</h2>
+          <p><span class="live-dot" id="logsLiveDot" aria-hidden="true"></span><span id="logsState">Ядро запущено</span></p>
+        </div>
+        <button class="logs-close" id="closeLogsBtn" type="button" aria-label="Закрыть логи">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+        </button>
+      </header>
+      <div class="logs-actions">
+        <span id="logsCount">0 строк</span>
+        <div>
+          <button id="copyLogsBtn" type="button">Копировать</button>
+          <button id="clearLogsBtn" type="button">Очистить</button>
+        </div>
+      </div>
+      <div class="logs-output" id="logsOutput" tabindex="0" aria-label="Диагностические логи"></div>
+      <p class="logs-privacy">Логи хранятся только в памяти до закрытия приложения. Ключи и серверные URI скрываются автоматически.</p>
+    </section>
+  </div>
+
+  <script src="tauri-bridge.js"></script>
+  <script src="server-display.js"></script>
+  <script src="settings-store.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
