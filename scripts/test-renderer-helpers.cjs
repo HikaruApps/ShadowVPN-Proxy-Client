@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const window = {};
 vm.runInNewContext(fs.readFileSync('src/renderer/server-display.js', 'utf8'), { window, Intl });
 
-const { regionalFlagCode, serverFlagAndName, sortServerProfiles } = window.shadowVpnDisplay;
+const { regionalFlagCode, serverFlagAndName, sortServerProfiles, serverCategoriesForProfile, filterServerProfiles } = window.shadowVpnDisplay;
 assert.equal(regionalFlagCode('🇩🇪'), 'de');
 assert.equal(regionalFlagCode('🇪🇺'), 'eu');
 assert.equal(regionalFlagCode('🏴‍☠️'), '');
@@ -26,6 +26,27 @@ const sortedProfiles = sortServerProfiles(unsortedProfiles, new Map([
   ['fast', { available: true, latencyMs: 20 }],
 ]), 'latency');
 assert.deepEqual(sortedProfiles.map(profile => profile.id), ['auto', 'fast', 'slow', 'offline']);
+const categoryProfiles = [
+  { id: 'auto', auto: true, name: 'Авто' },
+  { id: 'hysteria', name: '🇫🇮 Hysteria2 Finland' },
+  { id: 'ws', name: 'Germany | WS' },
+  { id: 'torrent', name: '🏴‍☠️ Torrent Server' },
+  { id: 'gemini', name: '🇺🇸 Gemini Residential WS' },
+  { id: 'warp', name: '🇩🇪 CloudFlare WARP' },
+  { id: 'news', name: 'News Server' },
+  { id: 'no-tls', name: '🇳🇱 Amsterdam No TLS' },
+  { id: 'no-tls-dash', name: 'France No-TLS' },
+  { id: 'tls', name: 'Sweden TLS' },
+];
+assert.deepEqual([...serverCategoriesForProfile(categoryProfiles[0])], ['all']);
+assert.deepEqual([...serverCategoriesForProfile(categoryProfiles[4])], ['all', 'fast', 'gemini']);
+assert.deepEqual(filterServerProfiles(categoryProfiles, 'fast').map(profile => profile.id), ['hysteria', 'ws', 'gemini']);
+assert.equal(serverCategoriesForProfile(categoryProfiles[6]).includes('fast'), false);
+assert.deepEqual(filterServerProfiles(categoryProfiles, 'p2p').map(profile => profile.id), ['torrent']);
+assert.deepEqual(filterServerProfiles(categoryProfiles, 'gemini').map(profile => profile.id), ['gemini']);
+assert.deepEqual(filterServerProfiles(categoryProfiles, 'warp').map(profile => profile.id), ['warp']);
+assert.deepEqual(filterServerProfiles(categoryProfiles, 'no-tls').map(profile => profile.id), ['no-tls', 'no-tls-dash']);
+assert.equal(serverCategoriesForProfile(categoryProfiles[9]).includes('no-tls'), false);
 for (const code of ['de', 'eu', 'fi', 'hk']) {
   assert.equal(fs.existsSync(`src/renderer/assets/flags/${code}.svg`), true, `${code}.svg is missing`);
 }
@@ -37,14 +58,36 @@ assert.equal(mainWindow.minHeight, 460);
 const styles = fs.readFileSync('src/renderer/styles.css', 'utf8');
 assert.match(styles, /grid-template-columns:\s*clamp\(320px, 45vw, 410px\)/);
 assert.match(styles, /\.server-card\s*\{[^}]*min-height:\s*56px/s);
+assert.match(styles, /\.server-card\.auto-card\s*\{[^}]*height:\s*56px/s);
+assert.match(styles, /\.server-categories\s*\{[^}]*min-height:\s*38px[^}]*flex-shrink:\s*0/s);
+assert.match(styles, /\.server-list\s*\{[^}]*flex:\s*1 1 auto/s);
 assert.match(styles, /\.connected-location\s*\{/);
+assert.match(styles, /\.setting-card\s*\{[^}]*margin-top:\s*10px/s);
+assert.match(styles, /\.settings-section-title \+ \.setting-card\s*\{[^}]*margin-top:\s*0/s);
 const markup = fs.readFileSync('src/renderer/index.html', 'utf8');
 assert.match(markup, /id="connectedLocation"[^>]*hidden/);
 assert.match(markup, /id="connectedLocationFlag"/);
 assert.match(markup, /id="connectedLocationName"/);
 assert.match(markup, /id="sortMenu"[^>]*hidden/);
+assert.match(markup, /id="serverCategoryTabs"[^>]*role="tablist"/);
+for (const category of ['all', 'fast', 'p2p', 'gemini', 'warp', 'no-tls']) assert.match(markup, new RegExp(`data-server-category="${category}"`));
+assert.match(markup, /id="pingBtn"[\s\S]*?class="ping-gauge"/);
+assert.match(markup, /class="ping-gauge-needle"/);
+assert.match(markup, /class="ping-gauge-needle" d="M12 17V11"/);
 assert.match(markup, /id="fragmentationToggle"/);
 assert.match(markup, /id="killSwitchToggle"/);
+assert.match(markup, /id="deviceHwid"/);
+assert.match(markup, /id="copyHwidBtn"/);
+assert.match(markup, /id="autoUpdateSelect"/);
+assert.match(markup, /id="autoUpdateDescription"/);
+assert.match(markup, /id="pingMethodSelect"/);
+assert.match(markup, /id="pingMethodDescription"/);
+assert.match(markup, /id="routingModeSelect"/);
+assert.match(markup, /id="routingDomainsInput"/);
+assert.match(markup, /placeholder="example\.com&#10;full:private\.example\.com&#10;keyword:messenger"/);
+assert.match(markup, /Сеть[\s\S]*DNS внутри VPN[\s\S]*Маршрутизация[\s\S]*Режим маршрутизации/);
+assert.match(markup, /Устройство[\s\S]*HWID устройства[\s\S]*Подписка[\s\S]*Обновление подписки[\s\S]*Сеть[\s\S]*DNS внутри VPN/);
+assert.match(styles, /\.welcome\s*\{[^}]*overflow-y:\s*hidden/s);
 const storageValues = new Map();
 const localStorage = { getItem: key => storageValues.get(key) ?? null, setItem: (key, value) => storageValues.set(key, value) };
 const settingsWindow = { localStorage };
@@ -65,6 +108,45 @@ assert.equal(settings.readFragmentation(), true);
 assert.equal(settings.readKillSwitch(), false);
 assert.equal(settings.writeKillSwitch(true), true);
 assert.equal(settings.readKillSwitch(), true);
+assert.equal(settings.readAutoUpdate(), '60');
+assert.equal(settings.writeAutoUpdate('15'), '15');
+assert.equal(settings.readAutoUpdate(), '15');
+assert.equal(settings.writeAutoUpdate('invalid'), '60');
+assert.equal(settings.writeLastSubscriptionSync(123456), 123456);
+assert.equal(settings.readLastSubscriptionSync(localStorage, 123456), 123456);
+assert.equal(settings.readPingMethod(), 'tcp');
+assert.equal(settings.writePingMethod('head'), 'head');
+assert.equal(settings.readPingMethod(), 'head');
+assert.equal(settings.writePingMethod('invalid'), 'tcp');
+assert.equal(settings.readPingOnOpen(), false);
+assert.equal(settings.writePingOnOpen(true), true);
+assert.equal(settings.readPingOnOpen(), true);
+assert.equal(settings.readRoutingMode(), 'full');
+assert.equal(settings.writeRoutingMode('bypass'), 'bypass');
+assert.equal(settings.readRoutingMode(), 'bypass');
+assert.equal(settings.writeRoutingMode('invalid'), 'full');
+assert.equal(settings.writeRoutingDomains('example.com\nfull:private.example.com'), 'example.com\nfull:private.example.com');
+assert.equal(settings.readRoutingDomains(), 'example.com\nfull:private.example.com');
+assert.equal(settings.routingModes.length, 3);
+const groupStorageValues = new Map();
+const groupLocalStorage = { getItem: key => groupStorageValues.get(key) ?? null, setItem: (key, value) => groupStorageValues.set(key, value) };
+const groupWindow = { localStorage: groupLocalStorage };
+vm.runInNewContext(fs.readFileSync('src/renderer/group-store.js', 'utf8'), { window: groupWindow, localStorage: groupLocalStorage, Date, Math, Set, JSON });
+const groups = groupWindow.shadowVpnGroups;
+const group = groups.makeGroup([], ['111111111111111111111111', 'bad', '000000000000000000000000']);
+assert.deepEqual([...group.profileIds], ['111111111111111111111111']);
+let groupState = groups.writeState({ groups: [{ ...group, name: '  Моя   Auto  ' }], activeGroupId: group.id });
+assert.equal(groupState.groups[0].name, 'Моя Auto');
+assert.equal(groups.activeGroup(groupState).id, group.id);
+assert.deepEqual([...groups.availableProfileIds(groupState.groups[0], [{ id: '111111111111111111111111' }, { id: '222222222222222222222222' }])], ['111111111111111111111111']);
+assert.match(markup, /id="groupsMenuItem"/);
+assert.match(markup, /id="groupsOverlay"[^>]*hidden/);
+assert.match(markup, /src="group-store\.js"/);
+assert.match(styles, /\.groups-panel\s*\{/);
+assert.match(markup, /id="autoStartToggle"/);
+assert.match(markup, /id="pingOnOpenToggle"/);
+assert.match(markup, /class="connection-map"/);
+assert.match(styles, /\.connection-map\s*\{/);
 const stopScript = fs.readFileSync('stop-shadowvpn.ps1', 'utf8');
 assert.match(stopScript, /ShadowVPN Kill Switch/);
 assert.match(stopScript, /Remove-NetRoute/);

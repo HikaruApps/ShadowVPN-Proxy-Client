@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xtls/xray-core/app/observatory"
 	"github.com/xtls/xray-core/core"
 )
 
@@ -18,12 +19,23 @@ func TestProfilesForRendererPrependsAutoWithoutSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	public := profilesForRenderer(profiles)
-	if len(public) != 2 || !public[0].Auto || public[0].ID != autoProfileID || public[0].Name != "Авто" {
+	if len(public) != 3 || !public[0].Auto || public[0].ID != autoProfileID || public[0].Name != "Авто" || public[1].ID != autoNoRUProfileID || public[1].Name != "Авто без РФ" {
 		t.Fatalf("auto profile missing: %#v", public)
 	}
 	encoded, _ := json.Marshal(public)
 	if strings.Contains(string(encoded), "example.com") || strings.Contains(string(encoded), "00000000-") {
 		t.Fatal("credentials exposed in renderer profiles")
+	}
+}
+
+func TestProfilesByIDPreservesSubscriptionOrder(t *testing.T) {
+	profiles := []Profile{{ID: "one"}, {ID: "two"}, {ID: "three"}}
+	filtered := profilesByID(profiles, []string{"three", "one", "missing"})
+	if len(filtered) != 2 || filtered[0].ID != "one" || filtered[1].ID != "three" {
+		t.Fatalf("wrong group candidates: %#v", filtered)
+	}
+	if all := profilesByID(profiles, nil); len(all) != len(profiles) {
+		t.Fatalf("empty restriction should keep every profile: %#v", all)
 	}
 }
 
@@ -68,6 +80,19 @@ func TestFastestProfileReturnsUnavailable(t *testing.T) {
 	}
 }
 
+func TestBestObservedProfileSelectsFastestAliveAndKeepsStableTie(t *testing.T) {
+	profiles := []Profile{{ID: "one"}, {ID: "two"}, {ID: "three"}}
+	statuses := []*observatory.OutboundStatus{
+		{OutboundTag: "auto-one", Alive: false, Delay: 4},
+		{OutboundTag: "auto-two", Alive: true, Delay: 19},
+		{OutboundTag: "auto-three", Alive: true, Delay: 19},
+	}
+	best, delay, ok := bestObservedProfile(profiles, statuses)
+	if !ok || best.ID != "two" || delay != 19 {
+		t.Fatalf("wrong observed profile: best=%#v delay=%d ok=%t", best, delay, ok)
+	}
+}
+
 func TestPingProfilesWithAutoMirrorsBestLatency(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -84,11 +109,19 @@ func TestPingProfilesWithAutoMirrorsBestLatency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	results := pingProfilesWithAuto(ctx, []Profile{{ID: "server", Address: "127.0.0.1", Port: port}})
-	if len(results) != 2 || results[0].ID != autoProfileID || results[1].ID != "server" {
+	if len(results) != 3 || results[0].ID != autoProfileID || results[1].ID != autoNoRUProfileID || results[2].ID != "server" {
 		t.Fatalf("unexpected results: %#v", results)
 	}
-	if !results[0].Available || results[0].LatencyMS != results[1].LatencyMS {
+	if !results[0].Available || !results[1].Available || results[0].LatencyMS != results[2].LatencyMS || results[1].LatencyMS != results[2].LatencyMS {
 		t.Fatalf("auto latency does not mirror best server: %#v", results)
+	}
+}
+
+func TestAutoNoRUFiltersRussianProfiles(t *testing.T) {
+	profiles := []Profile{{ID: "ru", Name: "🇷🇺 Москва"}, {ID: "fi", Name: "🇫🇮 Finland"}, {ID: "ru2", Name: "RU | Russia"}}
+	filtered := withoutRussianProfiles(profiles)
+	if len(filtered) != 1 || filtered[0].ID != "fi" {
+		t.Fatalf("Russian profiles were not filtered: %#v", filtered)
 	}
 }
 
@@ -128,7 +161,7 @@ func TestPrepareAutoProfilesPutsFastestFirst(t *testing.T) {
 	}
 }
 
-func TestAutoConfigEnablesContinuousObservatoryWithoutBalancer(t *testing.T) {
+func TestAutoConfigEnablesLeastPingFallback(t *testing.T) {
 	first, _ := parseURI(strings.Replace(sample, "example.com:443", "192.0.2.10:443", 1))
 	second, _ := parseURI(strings.Replace(sample, "example.com:443", "192.0.2.20:443", 1))
 	config, err := makeAutoConfigWithOptions([]Profile{second, first}, "cloudflare", nil, false, "auto")
@@ -146,8 +179,17 @@ func TestAutoConfigEnablesContinuousObservatoryWithoutBalancer(t *testing.T) {
 	if observatory["probeInterval"] != autoProbeInterval {
 		t.Fatalf("wrong observatory config: %#v", observatory)
 	}
-	if _, exists := decoded["routing"]; exists {
-		t.Fatal("fallback/balancer was enabled in the continuous-monitoring stage")
+	routing, _ := decoded["routing"].(map[string]any)
+	rules, _ := routing["rules"].([]any)
+	rule, _ := rules[0].(map[string]any)
+	if rule["balancerTag"] != "shadow-auto" {
+		t.Fatalf("Auto traffic is not routed through the balancer: %#v", rule)
+	}
+	balancers, _ := routing["balancers"].([]any)
+	balancer, _ := balancers[0].(map[string]any)
+	strategy, _ := balancer["strategy"].(map[string]any)
+	if strategy["type"] != "leastping" || balancer["fallbackTag"] != "auto-"+second.ID {
+		t.Fatalf("wrong fallback balancer config: %#v", balancer)
 	}
 	outbounds, _ := decoded["outbounds"].([]any)
 	firstOutbound, _ := outbounds[0].(map[string]any)

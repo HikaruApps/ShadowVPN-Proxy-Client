@@ -7,11 +7,14 @@ const serverList = document.getElementById("serverList");
 const pingBtn = document.getElementById("pingBtn");
 const sortBtn = document.getElementById("sortBtn");
 const sortMenu = document.getElementById("sortMenu");
+const serversHeading = document.getElementById("serversHeading");
+const serverCategoryTabs = document.getElementById("serverCategoryTabs");
 const menuBtn = document.getElementById("menuBtn");
 const appMenu = document.getElementById("appMenu");
 const logsMenuItem = document.getElementById("logsMenuItem");
 const syncSubscriptionBtn = document.getElementById("syncSubscriptionBtn");
 const settingsMenuItem = document.getElementById("settingsMenuItem");
+const groupsMenuItem = document.getElementById("groupsMenuItem");
 const changeSubscriptionBtn = document.getElementById("changeSubscriptionBtn");
 const settingsOverlay = document.getElementById("settingsOverlay");
 const closeSettingsBtn = document.getElementById("closeSettingsBtn");
@@ -20,8 +23,21 @@ const dnsDescription = document.getElementById("dnsDescription");
 const customDnsFields = document.getElementById("customDnsFields");
 const customDnsInput = document.getElementById("customDnsInput");
 const customDnsError = document.getElementById("customDnsError");
+const routingModeSelect = document.getElementById("routingModeSelect");
+const routingModeDescription = document.getElementById("routingModeDescription");
+const routingDomainsFields = document.getElementById("routingDomainsFields");
+const routingDomainsInput = document.getElementById("routingDomainsInput");
+const autoUpdateSelect = document.getElementById("autoUpdateSelect");
+const autoUpdateDescription = document.getElementById("autoUpdateDescription");
+const pingMethodSelect = document.getElementById("pingMethodSelect");
+const pingMethodDescription = document.getElementById("pingMethodDescription");
 const fragmentationToggle = document.getElementById("fragmentationToggle");
 const killSwitchToggle = document.getElementById("killSwitchToggle");
+const autoStartToggle = document.getElementById("autoStartToggle");
+const autoStartDescription = document.getElementById("autoStartDescription");
+const pingOnOpenToggle = document.getElementById("pingOnOpenToggle");
+const deviceHwid = document.getElementById("deviceHwid");
+const copyHwidBtn = document.getElementById("copyHwidBtn");
 const logsOverlay = document.getElementById("logsOverlay");
 const logsOutput = document.getElementById("logsOutput");
 const logsCount = document.getElementById("logsCount");
@@ -39,8 +55,25 @@ const ipValue = document.getElementById("ipValue");
 const connectionDivider = document.getElementById("connectionDivider");
 const connectionDuration = document.getElementById("connectionDuration");
 const connectionTime = document.getElementById("connectionTime");
+const groupsOverlay = document.getElementById("groupsOverlay");
+const closeGroupsBtn = document.getElementById("closeGroupsBtn");
+const createGroupBtn = document.getElementById("createGroupBtn");
+const groupsList = document.getElementById("groupsList");
+const groupEditor = document.getElementById("groupEditor");
+const groupEmpty = document.getElementById("groupEmpty");
+const groupFields = document.getElementById("groupFields");
+const groupNameInput = document.getElementById("groupNameInput");
+const activateGroupBtn = document.getElementById("activateGroupBtn");
+const groupAutoDescription = document.getElementById("groupAutoDescription");
+const groupHostCount = document.getElementById("groupHostCount");
+const groupSelectAllBtn = document.getElementById("groupSelectAllBtn");
+const groupClearBtn = document.getElementById("groupClearBtn");
+const groupHosts = document.getElementById("groupHosts");
+const deleteGroupBtn = document.getElementById("deleteGroupBtn");
 
 let selectedGroupId = "auto";
+const AUTO_PROFILE_ID = "000000000000000000000000";
+const AUTO_NO_RU_PROFILE_ID = "000000000000000000000001";
 let currentState = "disconnected";
 const pingResults = new Map();
 let directIp = "";
@@ -53,15 +86,35 @@ let logsLoading = false;
 let pendingLogLines = [];
 let logLineCount = 0;
 let sortMenuOpen = false;
-const { serverFlagAndName, sortServerProfiles } = window.shadowVpnDisplay;
-const { dnsProviders, readDNS, writeDNS, readCustomDNS, writeCustomDNS, readFragmentation, writeFragmentation, readKillSwitch, writeKillSwitch, parseCustomDNS } = window.shadowVpnSettings;
+const { serverFlagAndName, sortServerProfiles, filterServerProfiles } = window.shadowVpnDisplay;
+const { dnsProviders, readDNS, writeDNS, readCustomDNS, writeCustomDNS, readFragmentation, writeFragmentation, readKillSwitch, writeKillSwitch, autoUpdateIntervals, readAutoUpdate, writeAutoUpdate, readLastSubscriptionSync, writeLastSubscriptionSync, pingMethods, readPingMethod, writePingMethod, readPingOnOpen, writePingOnOpen, routingModes, readRoutingMode, writeRoutingMode, readRoutingDomains, writeRoutingDomains, parseCustomDNS } = window.shadowVpnSettings;
+const groupStore = window.shadowVpnGroups;
+let groupState = groupStore.readState();
+let editingGroupId = groupState.groups[0]?.id || "";
 let selectedDNS = readDNS();
 let customDNSValue = readCustomDNS();
 let fragmentationEnabled = readFragmentation();
 let killSwitchEnabled = readKillSwitch();
+let selectedAutoUpdate = readAutoUpdate();
+let selectedPingMethod = readPingMethod();
+let pingOnOpenEnabled = readPingOnOpen();
+let selectedRoutingMode = readRoutingMode();
+let routingDomainsValue = readRoutingDomains();
+let autoUpdateTimer = null;
+let pendingSubscriptionRefresh = false;
+let currentHWID = "";
 const sortStorageKey = "shadowvpn.serverSort";
 const sortModes = new Set(["alphabetical", "subscription", "latency"]);
 let selectedSort = "subscription";
+const categoryLabels = new Map([
+  ["all", "Все серверы"],
+  ["fast", "Быстрые"],
+  ["p2p", "P2P"],
+  ["gemini", "Gemini"],
+  ["warp", "WARP"],
+  ["no-tls", "No TLS"],
+]);
+let selectedCategory = "all";
 try {
   const savedSort = localStorage.getItem(sortStorageKey);
   if (sortModes.has(savedSort)) selectedSort = savedSort;
@@ -76,12 +129,26 @@ const STATUS_LABEL = {
 
 function renderServerList() {
   serverList.replaceChildren();
-  for (const profile of sortServerProfiles(serverProfiles, pingResults, selectedSort)) {
+  const visibleProfiles = filterServerProfiles(serverProfiles, selectedCategory);
+  if (currentState === "disconnected" && !visibleProfiles.some(profile => profile.id === selectedGroupId)) {
+    selectedGroupId = visibleProfiles[0]?.id || "";
+  }
+  if (!visibleProfiles.length) {
+    const empty = document.createElement("div");
+    empty.className = "server-list-empty";
+    empty.textContent = "В этой категории пока нет серверов";
+    serverList.append(empty);
+    return;
+  }
+  for (const profile of sortServerProfiles(visibleProfiles, pingResults, selectedSort)) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "server-card";
+    card.classList.toggle("auto-card", Boolean(profile.auto));
     card.dataset.groupId = profile.id;
     card.classList.toggle("selected", profile.id === selectedGroupId);
+    const activeAutoGroup = profile.auto ? groupStore.activeGroup(groupState) : null;
+    const autoCandidates = profile.auto ? autoProfilesFor(profile.id) : [];
     const display = serverFlagAndName(profile.name);
     const icon = document.createElement("div");
     icon.className = "server-icon";
@@ -107,7 +174,11 @@ function renderServerList() {
     const name = document.createElement("span"); name.className = "server-name"; name.textContent = display.name;
     const meta = document.createElement("span"); meta.className = "server-meta";
     meta.textContent = profile.auto
-      ? "САМЫЙ БЫСТРЫЙ СЕРВЕР"
+      ? activeAutoGroup
+        ? `${activeAutoGroup.name.toUpperCase()}${profile.id === AUTO_NO_RU_PROFILE_ID ? " · БЕЗ РФ" : ""} · ${autoCandidates.length} СЕРВ.`
+        : profile.id === AUTO_NO_RU_PROFILE_ID
+          ? `АВТОВЫБОР · БЕЗ РФ · ${autoCandidates.length} СЕРВ.`
+          : "АВТОВЫБОР · ВСЕ СЕРВЕРЫ"
       : `${profile.protocol.toUpperCase()} / ${profile.transport.toUpperCase()}`;
     const ping = document.createElement("span");
     ping.className = "server-ping";
@@ -131,6 +202,16 @@ function renderServerList() {
       serverList.querySelectorAll(".server-card").forEach(row => row.classList.toggle("selected", row.dataset.groupId === profile.id));
     });
     serverList.append(card);
+  }
+}
+
+function updateCategoryControl() {
+  serversHeading.textContent = categoryLabels.get(selectedCategory) || "Все серверы";
+  for (const tab of serverCategoryTabs.querySelectorAll("[data-server-category]")) {
+    const active = tab.dataset.serverCategory === selectedCategory;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
   }
 }
 
@@ -198,6 +279,18 @@ function setConnectedLocation(profile) {
   }
   connectedLocationName.textContent = display.name;
   connectedLocation.hidden = false;
+}
+
+function applyAutoProfileChange(profile) {
+  if (currentState !== "connected" || !profile?.name) return;
+  const previousName = connectedLocationName.textContent;
+  setConnectedLocation(profile);
+  if (previousName && previousName !== connectedLocationName.textContent && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    connectedLocation.animate(
+      [{ opacity: .35, transform: "translateY(3px)" }, { opacity: 1, transform: "translateY(0)" }],
+      { duration: 380, easing: "cubic-bezier(.16, 1, .3, 1)" },
+    );
+  }
 }
 
 function stopIpEncryption() {
@@ -294,6 +387,7 @@ async function loadProtectedIp() {
 function applyState(state) {
   const previousState = currentState;
   currentState = state;
+  dashboard.dataset.vpnState = state;
   statusText.textContent = STATUS_LABEL[state] ?? state;
 
   powerBtn.classList.remove("connected", "connecting");
@@ -319,6 +413,11 @@ function applyState(state) {
         if (currentState === "disconnected") void loadDirectIp();
       }, 350);
     }
+    if (pendingSubscriptionRefresh && !requestBusy) {
+      window.setTimeout(() => {
+        if (currentState === "disconnected" && pendingSubscriptionRefresh) void syncSubscription("automatic");
+      }, 700);
+    }
   }
 
   powerBtn.setAttribute("aria-pressed", String(state === "connected"));
@@ -332,9 +431,14 @@ function applyState(state) {
 }
 
 function updatePingButton() {
+  powerBtn.disabled = requestBusy
+    || currentState === "connecting"
+    || currentState === "disconnecting"
+    || (currentState === "disconnected" && !selectedGroupId);
   pingBtn.disabled = requestBusy || currentState !== "disconnected" || serverProfiles.length === 0;
   syncSubscriptionBtn.disabled = requestBusy || currentState !== "disconnected";
   changeSubscriptionBtn.disabled = requestBusy || currentState !== "disconnected";
+  groupsMenuItem.disabled = requestBusy || currentState !== "disconnected";
 }
 
 function setMenuOpen(open) {
@@ -432,10 +536,49 @@ function updateDNSControl() {
   }
 }
 
+function updateRoutingControl() {
+  routingModeSelect.value = selectedRoutingMode;
+  const mode = routingModes.find(item => item.id === selectedRoutingMode) || routingModes[0];
+  routingModeDescription.textContent = mode.detail;
+  routingDomainsFields.hidden = selectedRoutingMode === "full";
+  routingDomainsInput.value = routingDomainsValue;
+}
+
+async function loadDeviceInfo() {
+  if (currentHWID) return;
+  const reply = await window.vpnApi.deviceInfo();
+  if (reply.ok && /^[0-9a-f]{64}$/i.test(reply.result?.hwid || "")) {
+    currentHWID = reply.result.hwid;
+    deviceHwid.textContent = currentHWID;
+    deviceHwid.title = currentHWID;
+    copyHwidBtn.disabled = false;
+  } else {
+    deviceHwid.textContent = "Недоступен";
+    copyHwidBtn.disabled = true;
+  }
+}
+
+async function loadAutoStart() {
+  autoStartToggle.disabled = true;
+  const reply = await window.vpnApi.getAutoStart();
+  if (reply.ok) {
+    autoStartToggle.checked = Boolean(reply.result);
+    autoStartDescription.textContent = reply.result
+      ? "ShadowVPN запускается после входа в Windows"
+      : "Запускать ShadowVPN после входа в систему";
+  } else {
+    autoStartDescription.textContent = "Не удалось проверить автозапуск";
+  }
+  autoStartToggle.disabled = false;
+}
+
 function openSettings() {
   setMenuOpen(false);
   settingsOverlay.hidden = false;
   updateDNSControl();
+  updateRoutingControl();
+  void loadDeviceInfo();
+  void loadAutoStart();
   dnsSelect.focus({ preventScroll: true });
 }
 
@@ -447,6 +590,144 @@ async function closeSettings() {
   }
   settingsOverlay.hidden = true;
   menuBtn.focus({ preventScroll: true });
+}
+
+function persistGroups() {
+  groupState = groupStore.writeState(groupState);
+  renderServerList();
+}
+
+function currentEditedGroup() {
+  return groupState.groups.find(group => group.id === editingGroupId) || null;
+}
+
+function renderGroupList() {
+  groupsList.replaceChildren();
+  for (const group of groupState.groups) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "group-list-item";
+    button.classList.toggle("selected", group.id === editingGroupId);
+    button.classList.toggle("active", group.id === groupState.activeGroupId);
+    const name = document.createElement("strong");
+    name.textContent = group.name;
+    const count = groupStore.availableProfileIds(group, serverProfiles).length;
+    const detail = document.createElement("small");
+    detail.textContent = `${count} серверов${group.id === groupState.activeGroupId ? " · AUTO" : ""}`;
+    button.append(name, detail);
+    button.addEventListener("click", () => { editingGroupId = group.id; renderGroupsEditor(); });
+    groupsList.append(button);
+  }
+}
+
+function renderGroupHosts(group) {
+  groupHosts.replaceChildren();
+  const realProfiles = serverProfiles.filter(profile => !profile.auto);
+  const selected = new Set(group.profileIds);
+  for (const profile of realProfiles) {
+    const display = serverFlagAndName(profile.name);
+    const label = document.createElement("label");
+    label.className = "group-host";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = selected.has(profile.id);
+    const copy = document.createElement("span");
+    copy.className = "group-host-copy";
+    const name = document.createElement("strong");
+    name.textContent = `${display.flag ? `${display.flag} ` : ""}${display.name}`;
+    const meta = document.createElement("small");
+    meta.textContent = `${profile.protocol.toUpperCase()} / ${profile.transport.toUpperCase()}`;
+    copy.append(name, meta);
+    label.append(checkbox, copy);
+    checkbox.addEventListener("change", () => {
+      const ids = new Set(group.profileIds);
+      if (checkbox.checked) ids.add(profile.id); else ids.delete(profile.id);
+      group.profileIds = groupStore.cleanProfileIds([...ids]);
+      persistGroups();
+      renderGroupsEditor();
+    });
+    groupHosts.append(label);
+  }
+  if (!realProfiles.length) {
+    const empty = document.createElement("div");
+    empty.className = "group-empty";
+    empty.textContent = "В подписке пока нет серверов";
+    groupHosts.append(empty);
+  }
+}
+
+function renderGroupsEditor() {
+  if (!currentEditedGroup() && groupState.groups.length) editingGroupId = groupState.groups[0].id;
+  const group = currentEditedGroup();
+  renderGroupList();
+  groupEmpty.hidden = Boolean(group);
+  groupFields.hidden = !group;
+  if (!group) return;
+  groupNameInput.value = group.name;
+  const active = group.id === groupState.activeGroupId;
+  activateGroupBtn.classList.toggle("active", active);
+  activateGroupBtn.setAttribute("aria-pressed", String(active));
+  groupAutoDescription.textContent = active ? "Активная группа Auto" : "Только выбранные серверы";
+  const availableCount = groupStore.availableProfileIds(group, serverProfiles).length;
+  groupHostCount.textContent = `${availableCount} выбрано`;
+  renderGroupHosts(group);
+}
+
+function openGroups() {
+  if (currentState !== "disconnected") return;
+  setMenuOpen(false);
+  groupsOverlay.hidden = false;
+  renderGroupsEditor();
+  (currentEditedGroup() ? groupNameInput : createGroupBtn).focus({ preventScroll: true });
+}
+
+async function closeGroups() {
+  if (groupsOverlay.hidden) return;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!reduceMotion) await groupsOverlay.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: "ease-in" }).finished;
+  groupsOverlay.hidden = true;
+  menuBtn.focus({ preventScroll: true });
+}
+
+function createGroup() {
+  const group = groupStore.makeGroup(groupState.groups, []);
+  groupState.groups.push(group);
+  if (!groupState.activeGroupId) groupState.activeGroupId = group.id;
+  editingGroupId = group.id;
+  persistGroups();
+  renderGroupsEditor();
+  groupNameInput.select();
+}
+
+function activeAutoProfileIds() {
+  const group = groupStore.activeGroup(groupState);
+  return group ? groupStore.availableProfileIds(group, serverProfiles) : [];
+}
+
+function isRussianRendererProfile(profile) {
+  const display = serverFlagAndName(profile?.name);
+  if (display.flagCode === "ru" || String(profile?.name || "").includes("🇷🇺")) return true;
+  return String(display.name || "").normalize("NFKC").toLocaleLowerCase("ru-RU")
+    .split(/\s+/)
+    .map(part => part.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, ""))
+    .some(part => ["ru", "rus", "russia", "россия", "рф"].includes(part));
+}
+
+function autoProfilesFor(autoId) {
+  const group = groupStore.activeGroup(groupState);
+  const allowed = group ? new Set(groupStore.availableProfileIds(group, serverProfiles)) : null;
+  return serverProfiles.filter(profile => !profile.auto
+    && (!allowed || allowed.has(profile.id))
+    && (autoId !== AUTO_NO_RU_PROFILE_ID || !isRussianRendererProfile(profile)));
+}
+
+function refreshAutoPingForGroup() {
+  for (const autoId of [AUTO_PROFILE_ID, AUTO_NO_RU_PROFILE_ID]) {
+    const values = autoProfilesFor(autoId).map(profile => pingResults.get(profile.id)).filter(result => result?.available);
+    pingResults.set(autoId, values.length
+      ? { id: autoId, available: true, latencyMs: Math.min(...values.map(result => result.latencyMs)) }
+      : { id: autoId, available: false });
+  }
 }
 
 /**
@@ -471,6 +752,16 @@ powerBtn.addEventListener("click", async () => {
   if (requestBusy || currentState === "connecting" || currentState === "disconnecting") return;
   if (!serverProfiles.length) { statusText.textContent = "Сначала добавьте подписку"; return; }
   const disconnecting = currentState === "connected";
+  const selectedIsAuto = !disconnecting && [AUTO_PROFILE_ID, AUTO_NO_RU_PROFILE_ID].includes(selectedGroupId);
+  const selectedAutoGroup = selectedIsAuto ? groupStore.activeGroup(groupState) : null;
+  const selectedAutoProfileIds = selectedIsAuto ? autoProfilesFor(selectedGroupId).map(profile => profile.id) : [];
+  if (selectedIsAuto && !selectedAutoProfileIds.length) {
+    statusText.textContent = selectedAutoGroup
+      ? `В группе «${selectedAutoGroup.name}» нет подходящих серверов`
+      : "Для этого режима Auto нет подходящих серверов";
+    if (selectedAutoGroup) openGroups();
+    return;
+  }
   let customDNSServers = [];
   if (!disconnecting && selectedDNS === "custom") {
     const validation = parseCustomDNS(customDNSValue);
@@ -486,6 +777,7 @@ powerBtn.addEventListener("click", async () => {
   requestBusy = true; powerBtn.disabled = true;
   updatePingButton();
   try {
+    const directDomains = routingDomainsValue.split(/\s+/).map(item => item.trim()).filter(Boolean);
     if (!disconnecting && !directIp) {
       await Promise.race([
         loadDirectIp(),
@@ -494,7 +786,7 @@ powerBtn.addEventListener("click", async () => {
     }
     const reply = disconnecting
       ? await window.vpnApi.disconnect()
-      : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled);
+      : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains);
     if (!reply.ok) {
       statusText.textContent = reply.error;
     } else if (!disconnecting) {
@@ -502,7 +794,14 @@ powerBtn.addEventListener("click", async () => {
       void loadProtectedIp();
     }
   } catch { statusText.textContent = "Не удалось связаться с ядром"; }
-  finally { requestBusy = false; powerBtn.disabled = false; updatePingButton(); }
+  finally {
+    requestBusy = false;
+    powerBtn.disabled = false;
+    updatePingButton();
+    if (disconnecting && currentState === "disconnected" && pendingSubscriptionRefresh) {
+      window.setTimeout(() => void requestAutomaticSubscriptionUpdate(), 700);
+    }
+  }
 });
 
 async function runPingTest() {
@@ -513,19 +812,21 @@ async function runPingTest() {
   for (const profile of serverProfiles) pingResults.set(profile.id, "pending");
   renderServerList();
   updatePingButton();
-  statusText.textContent = "Проверяем TCP-пинг серверов…";
+  const pingLabel = selectedPingMethod === "tcp" ? "TCP" : `HTTP ${selectedPingMethod.toUpperCase()}`;
+  statusText.textContent = `Проверяем ${pingLabel}-пинг серверов…`;
   try {
-    const reply = await window.vpnApi.ping();
+    const reply = await window.vpnApi.ping(selectedPingMethod);
     if (!reply.ok) throw new Error(reply.error);
     for (const result of reply.result) pingResults.set(result.id, result);
+    refreshAutoPingForGroup();
     renderServerList();
     const realResults = reply.result.filter(result => !serverProfiles.find(profile => profile.id === result.id)?.auto);
     const available = realResults.filter(result => result.available).length;
-    statusText.textContent = `TCP-пинг проверен: ${available} из ${realResults.length} доступны`;
+    statusText.textContent = `${pingLabel}-пинг проверен: ${available} из ${realResults.length} доступны`;
   } catch (error) {
     for (const profile of serverProfiles) pingResults.delete(profile.id);
     renderServerList();
-    statusText.textContent = error.message || "Не удалось проверить TCP-пинг";
+    statusText.textContent = error.message || "Не удалось проверить задержку";
   } finally {
     requestBusy = false;
     powerBtn.disabled = false;
@@ -537,6 +838,7 @@ async function runPingTest() {
 pingBtn.addEventListener("click", runPingTest);
 
 window.vpnApi.onStateChange(applyPushedState);
+window.vpnApi.onProfileChange(applyAutoProfileChange);
 window.vpnApi.onLog(line => {
   const value = String(line);
   if (value.includes("Go core process exited")) {
@@ -551,6 +853,7 @@ window.vpnApi.onLog(line => {
 });
 window.vpnApi.getState().then(applyPolledState);
 
+updateCategoryControl();
 renderServerList();
 updatePingButton();
 
@@ -560,6 +863,56 @@ const dashboard = document.getElementById("dashboard");
 const subscriptionUrl = document.getElementById("subscriptionUrl");
 const subscriptionError = document.getElementById("subscriptionError");
 const subscriptionStorageKey = "shadowvpn.subscriptionUrl";
+function autoUpdateIntervalMs() {
+  return (autoUpdateIntervals.find(item => item.id === selectedAutoUpdate)?.minutes || 0) * 60000;
+}
+function clearAutoUpdateTimer() {
+  if (autoUpdateTimer !== null) window.clearTimeout(autoUpdateTimer);
+  autoUpdateTimer = null;
+}
+function scheduleSubscriptionUpdate(delayOverride) {
+  clearAutoUpdateTimer();
+  const interval = autoUpdateIntervalMs();
+  if (!interval) return;
+  const lastSync = readLastSubscriptionSync();
+  const delay = Number.isFinite(delayOverride)
+    ? Math.max(1000, delayOverride)
+    : Math.max(1000, lastSync ? lastSync + interval - Date.now() : interval);
+  autoUpdateTimer = window.setTimeout(() => {
+    autoUpdateTimer = null;
+    void requestAutomaticSubscriptionUpdate();
+  }, delay);
+}
+async function requestAutomaticSubscriptionUpdate() {
+  if (currentState !== "disconnected") {
+    pendingSubscriptionRefresh = true;
+    return;
+  }
+  if (requestBusy) {
+    scheduleSubscriptionUpdate(60000);
+    return;
+  }
+  await syncSubscription("automatic");
+}
+function subscriptionSyncSucceeded() {
+  pendingSubscriptionRefresh = false;
+  writeLastSubscriptionSync();
+  scheduleSubscriptionUpdate();
+}
+function updateAutoUpdateControl() {
+  autoUpdateSelect.value = selectedAutoUpdate;
+  autoUpdateDescription.textContent = selectedAutoUpdate === "off"
+    ? "Автоматическое обновление выключено"
+    : "Работает в фоне · активный VPN не прерывается";
+}
+function updatePingMethodControl() {
+  pingMethodSelect.value = selectedPingMethod;
+  const method = pingMethods.find(item => item.id === selectedPingMethod) || pingMethods[0];
+  pingMethodDescription.textContent = method.detail;
+  const label = method.id === "tcp" ? "TCP-пинг" : `HTTP ${method.id.toUpperCase()}-пинг`;
+  pingBtn.setAttribute("aria-label", `Измерить ${label} серверов`);
+  pingBtn.title = `Измерить ${label}`;
+}
 function validSubscriptionUrl(value) {
   try {
     const url = new URL(value);
@@ -592,7 +945,7 @@ async function switchScreen(from, to, focusTarget) {
 function openDashboard() {
   return switchScreen(welcomeScreen, dashboard, powerBtn);
 }
-async function importSubscription() {
+async function importSubscription(trigger = "manual") {
   if (requestBusy) return;
   const value = subscriptionUrl.value.trim();
   if (!validSubscriptionUrl(value)) {
@@ -604,21 +957,28 @@ async function importSubscription() {
   button.disabled = true; subscriptionUrl.disabled = true;
   button.textContent = "Загружаем серверы…"; subscriptionError.textContent = "";
   try {
-    const reply = await window.vpnApi.importSubscription(value);
+    const reply = await window.vpnApi.importSubscription(value, trigger);
     if (!reply.ok) throw new Error(reply.error);
-    serverProfiles = reply.result;
+    const imported = Array.isArray(reply.result) ? { profiles: reply.result, skipped: 0 } : reply.result;
+    serverProfiles = imported?.profiles || [];
+    groupState = groupStore.writeState(groupState);
     pingResults.clear();
     if (!serverProfiles.length) throw new Error("В подписке нет серверов");
     selectedGroupId = serverProfiles[0].id;
     renderServerList();
+    if (imported?.skipped > 0) statusText.textContent = `Подписка загружена · пропущено неподдерживаемых: ${imported.skipped}`;
     try { localStorage.setItem(subscriptionStorageKey, value); } catch { /* Import still works for this session. */ }
+    subscriptionSyncSucceeded();
     await openDashboard();
     void loadDirectIp();
+    if (trigger === "startup" && pingOnOpenEnabled) {
+      window.setTimeout(() => void runPingTest(), 450);
+    }
   } catch (e) { subscriptionError.textContent = e.message || "Ошибка импорта подписки"; }
   finally { requestBusy = false; button.disabled = false; subscriptionUrl.disabled = false; button.textContent = "Добавить подписку"; updatePingButton(); }
 }
 
-async function syncSubscription() {
+async function syncSubscription(trigger = "manual") {
   if (requestBusy || currentState !== "disconnected") return;
   let value = subscriptionUrl.value.trim();
   try { value = localStorage.getItem(subscriptionStorageKey) || value; } catch { /* Use the form value. */ }
@@ -628,25 +988,29 @@ async function syncSubscription() {
     return;
   }
 
-  setMenuOpen(false);
+  if (trigger === "manual") setMenuOpen(false);
   requestBusy = true;
   powerBtn.disabled = true;
   syncSubscriptionBtn.classList.add("syncing");
   updatePingButton();
-  statusText.textContent = "Синхронизируем подписку…";
+  statusText.textContent = trigger === "automatic" ? "Автоматически обновляем подписку…" : "Синхронизируем подписку…";
   try {
-    const reply = await window.vpnApi.importSubscription(value);
+    const reply = await window.vpnApi.importSubscription(value, trigger);
     if (!reply.ok) throw new Error(reply.error);
-    if (!Array.isArray(reply.result) || !reply.result.length) throw new Error("В подписке нет серверов");
+    const imported = Array.isArray(reply.result) ? { profiles: reply.result, skipped: 0 } : reply.result;
+    if (!Array.isArray(imported?.profiles) || !imported.profiles.length) throw new Error("В подписке нет серверов");
     const previousSelection = selectedGroupId;
-    serverProfiles = reply.result;
+    serverProfiles = imported.profiles;
+    groupState = groupStore.writeState(groupState);
     selectedGroupId = serverProfiles.some(profile => profile.id === previousSelection) ? previousSelection : serverProfiles[0].id;
     pingResults.clear();
     renderServerList();
     const serverCount = serverProfiles.filter(profile => !profile.auto).length;
-    statusText.textContent = `Подписка синхронизирована · ${serverCount} серверов`;
+    statusText.textContent = `Подписка синхронизирована · ${serverCount} серверов${imported.skipped ? ` · пропущено: ${imported.skipped}` : ""}`;
+    subscriptionSyncSucceeded();
   } catch (error) {
     statusText.textContent = error.message || "Не удалось обновить подписку";
+    scheduleSubscriptionUpdate(trigger === "automatic" ? 300000 : undefined);
   } finally {
     requestBusy = false;
     powerBtn.disabled = false;
@@ -655,10 +1019,10 @@ async function syncSubscription() {
   }
 }
 
-document.getElementById("subscriptionForm").addEventListener("submit", event => { event.preventDefault(); importSubscription(); });
+document.getElementById("subscriptionForm").addEventListener("submit", event => { event.preventDefault(); void importSubscription("manual"); });
 try {
   const saved = localStorage.getItem(subscriptionStorageKey);
-  if (saved && validSubscriptionUrl(saved)) { subscriptionUrl.value = saved; importSubscription(); }
+  if (saved && validSubscriptionUrl(saved)) { subscriptionUrl.value = saved; void importSubscription("startup"); }
 } catch { /* Storage may be unavailable. */ }
 subscriptionUrl.addEventListener("input", () => {
   subscriptionError.textContent = "";
@@ -685,9 +1049,71 @@ sortMenu.addEventListener("click", event => {
   const hasResults = [...pingResults.values()].some(result => result && result !== "pending");
   if (selectedSort === "latency" && !hasResults) void runPingTest();
 });
+serverCategoryTabs.addEventListener("click", event => {
+  const tab = event.target.closest("[data-server-category]");
+  if (!tab || !categoryLabels.has(tab.dataset.serverCategory)) return;
+  selectedCategory = tab.dataset.serverCategory;
+  updateCategoryControl();
+  renderServerList();
+  updatePingButton();
+  if (currentState === "disconnected" && !requestBusy) {
+    statusText.textContent = selectedGroupId ? STATUS_LABEL.disconnected : "В этой категории пока нет серверов";
+  }
+});
 logsMenuItem.addEventListener("click", openLogs);
-syncSubscriptionBtn.addEventListener("click", syncSubscription);
+syncSubscriptionBtn.addEventListener("click", () => { void syncSubscription("manual"); });
 settingsMenuItem.addEventListener("click", openSettings);
+groupsMenuItem.addEventListener("click", openGroups);
+createGroupBtn.addEventListener("click", createGroup);
+groupNameInput.addEventListener("input", () => {
+  const group = currentEditedGroup();
+  if (!group) return;
+  group.name = groupNameInput.value.slice(0, 40);
+  groupState = groupStore.writeState(groupState);
+  renderGroupList();
+  renderServerList();
+});
+groupNameInput.addEventListener("blur", () => {
+  const group = currentEditedGroup();
+  if (!group) return;
+  group.name = groupStore.cleanName(group.name);
+  persistGroups();
+  renderGroupsEditor();
+});
+activateGroupBtn.addEventListener("click", () => {
+  const group = currentEditedGroup();
+  if (!group) return;
+  groupState.activeGroupId = groupState.activeGroupId === group.id ? "" : group.id;
+  persistGroups();
+  refreshAutoPingForGroup();
+  renderServerList();
+  renderGroupsEditor();
+});
+deleteGroupBtn.addEventListener("click", () => {
+  const group = currentEditedGroup();
+  if (!group) return;
+  groupState.groups = groupState.groups.filter(item => item.id !== group.id);
+  if (groupState.activeGroupId === group.id) groupState.activeGroupId = "";
+  editingGroupId = groupState.groups[0]?.id || "";
+  persistGroups();
+  refreshAutoPingForGroup();
+  renderServerList();
+  renderGroupsEditor();
+});
+groupSelectAllBtn.addEventListener("click", () => {
+  const group = currentEditedGroup();
+  if (!group) return;
+  group.profileIds = serverProfiles.filter(profile => !profile.auto).map(profile => profile.id);
+  persistGroups();
+  renderGroupsEditor();
+});
+groupClearBtn.addEventListener("click", () => {
+  const group = currentEditedGroup();
+  if (!group) return;
+  group.profileIds = [];
+  persistGroups();
+  renderGroupsEditor();
+});
 dnsSelect.addEventListener("change", () => {
   selectedDNS = writeDNS(dnsSelect.value);
   updateDNSControl();
@@ -705,6 +1131,58 @@ fragmentationToggle.addEventListener("change", () => {
 killSwitchToggle.addEventListener("change", () => {
   killSwitchEnabled = writeKillSwitch(killSwitchToggle.checked);
 });
+routingModeSelect.addEventListener("change", () => {
+  selectedRoutingMode = writeRoutingMode(routingModeSelect.value);
+  updateRoutingControl();
+  if (selectedRoutingMode !== "full") routingDomainsInput.focus({ preventScroll: true });
+});
+routingDomainsInput.addEventListener("input", () => {
+  routingDomainsValue = writeRoutingDomains(routingDomainsInput.value);
+});
+autoStartToggle.addEventListener("change", async () => {
+  const requested = autoStartToggle.checked;
+  autoStartToggle.disabled = true;
+  autoStartDescription.textContent = requested ? "Добавляем задачу запуска Windows…" : "Удаляем задачу запуска Windows…";
+  const reply = await window.vpnApi.setAutoStart(requested);
+  if (!reply.ok) {
+    autoStartToggle.checked = !requested;
+    autoStartDescription.textContent = reply.error || "Не удалось изменить автозапуск";
+  } else {
+    autoStartDescription.textContent = requested
+      ? "ShadowVPN запускается после входа в Windows"
+      : "Запускать ShadowVPN после входа в систему";
+  }
+  autoStartToggle.disabled = false;
+});
+pingOnOpenToggle.addEventListener("change", () => {
+  pingOnOpenEnabled = writePingOnOpen(pingOnOpenToggle.checked);
+});
+autoUpdateSelect.addEventListener("change", () => {
+  selectedAutoUpdate = writeAutoUpdate(autoUpdateSelect.value);
+  pendingSubscriptionRefresh = false;
+  updateAutoUpdateControl();
+  scheduleSubscriptionUpdate();
+});
+pingMethodSelect.addEventListener("change", () => {
+  selectedPingMethod = writePingMethod(pingMethodSelect.value);
+  pingResults.clear();
+  updatePingMethodControl();
+  renderServerList();
+});
+copyHwidBtn.addEventListener("click", async () => {
+  if (!currentHWID) return;
+  try { await navigator.clipboard.writeText(currentHWID); }
+  catch {
+    const area = document.createElement("textarea");
+    area.value = currentHWID;
+    document.body.append(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+  }
+  copyHwidBtn.textContent = "Скопировано";
+  window.setTimeout(() => { copyHwidBtn.textContent = "Копировать"; }, 1200);
+});
 changeSubscriptionBtn.addEventListener("click", () => {
   if (requestBusy || currentState !== "disconnected") return;
   setMenuOpen(false);
@@ -714,6 +1192,8 @@ closeLogsBtn.addEventListener("click", closeLogs);
 logsOverlay.addEventListener("click", event => { if (event.target === logsOverlay) closeLogs(); });
 closeSettingsBtn.addEventListener("click", closeSettings);
 settingsOverlay.addEventListener("click", event => { if (event.target === settingsOverlay) closeSettings(); });
+closeGroupsBtn.addEventListener("click", closeGroups);
+groupsOverlay.addEventListener("click", event => { if (event.target === groupsOverlay) closeGroups(); });
 copyLogsBtn.addEventListener("click", async () => {
   const text = [...logsOutput.querySelectorAll(".log-line")].map(row => row.textContent).join("\n");
   if (!text) return;
@@ -743,6 +1223,7 @@ document.addEventListener("click", event => {
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
   if (!settingsOverlay.hidden) closeSettings();
+  else if (!groupsOverlay.hidden) closeGroups();
   else if (!logsOverlay.hidden) closeLogs();
   else if (menuOpen) setMenuOpen(false);
   else if (sortMenuOpen) setSortMenuOpen(false);
@@ -758,8 +1239,33 @@ for (const provider of dnsProviders) {
   option.textContent = `${provider.name} · ${provider.detail}`;
   dnsSelect.append(option);
 }
+for (const interval of autoUpdateIntervals) {
+  const option = document.createElement("option");
+  option.value = interval.id;
+  option.textContent = interval.name;
+  autoUpdateSelect.append(option);
+}
+for (const method of pingMethods) {
+  const option = document.createElement("option");
+  option.value = method.id;
+  option.textContent = method.name;
+  pingMethodSelect.append(option);
+}
+for (const mode of routingModes) {
+  const option = document.createElement("option");
+  option.value = mode.id;
+  option.textContent = mode.name;
+  routingModeSelect.append(option);
+}
 customDnsInput.value = customDNSValue;
+selectedRoutingMode = readRoutingMode();
+routingDomainsValue = readRoutingDomains();
 fragmentationToggle.checked = fragmentationEnabled;
 killSwitchToggle.checked = killSwitchEnabled;
+pingOnOpenToggle.checked = pingOnOpenEnabled;
+dashboard.dataset.vpnState = currentState;
 updateDNSControl();
+updateRoutingControl();
+updateAutoUpdateControl();
+updatePingMethodControl();
 updateSortControl();

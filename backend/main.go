@@ -18,21 +18,28 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xtls/xray-core/app/observatory"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/extension"
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
 type request struct {
-	ID         int      `json:"id"`
-	Method     string   `json:"method"`
-	URL        string   `json:"url"`
-	ProfileID  string   `json:"profileId"`
-	DNS        string   `json:"dns"`
-	DNSServers []string `json:"dnsServers"`
-	Fragment   bool     `json:"fragmentation"`
-	KillSwitch bool     `json:"killSwitch"`
-	Masked     bool     `json:"masked"`
+	ID             int      `json:"id"`
+	Method         string   `json:"method"`
+	URL            string   `json:"url"`
+	Reason         string   `json:"reason"`
+	ProfileID      string   `json:"profileId"`
+	DNS            string   `json:"dns"`
+	DNSServers     []string `json:"dnsServers"`
+	Fragment       bool     `json:"fragmentation"`
+	KillSwitch     bool     `json:"killSwitch"`
+	AutoProfileIDs []string `json:"autoProfileIds"`
+	Masked         bool     `json:"masked"`
+	PingMethod     string   `json:"pingMethod"`
+	RouteMode      string   `json:"routeMode"`
+	DirectDomains  []string `json:"directDomains"`
 }
 
 type connectionInfo struct {
@@ -48,6 +55,9 @@ type worker struct {
 	instance      *core.Instance
 	profiles      []Profile
 	activeProfile connectionInfo
+	activeMu      sync.RWMutex
+	autoCancel    context.CancelFunc
+	autoWG        sync.WaitGroup
 	killSwitch    *killSwitchGuard
 	enc           *json.Encoder
 	mu            sync.Mutex
@@ -66,8 +76,101 @@ func (w *worker) setState(s string) {
 	w.logf("state=%s", s)
 	w.send(map[string]any{"event": "state", "state": s})
 }
-func (w *worker) close() error {
+func (w *worker) clearActiveProfile() {
+	w.activeMu.Lock()
 	w.activeProfile = connectionInfo{}
+	w.activeMu.Unlock()
+}
+func (w *worker) setActiveProfile(profile Profile) {
+	w.activeMu.Lock()
+	w.activeProfile = connectionInfoForProfile(profile)
+	w.activeMu.Unlock()
+}
+func (w *worker) currentActiveProfile() connectionInfo {
+	w.activeMu.RLock()
+	defer w.activeMu.RUnlock()
+	return w.activeProfile
+}
+func (w *worker) stopAutoMonitor() {
+	if w.autoCancel == nil {
+		return
+	}
+	w.autoCancel()
+	w.autoCancel = nil
+	w.autoWG.Wait()
+}
+func bestObservedProfile(profiles []Profile, statuses []*observatory.OutboundStatus) (Profile, int64, bool) {
+	byTag := make(map[string]*observatory.OutboundStatus, len(statuses))
+	for _, status := range statuses {
+		if status != nil {
+			byTag[status.OutboundTag] = status
+		}
+	}
+	var best Profile
+	var bestDelay int64
+	found := false
+	for _, profile := range profiles {
+		status := byTag["auto-"+profile.ID]
+		if status == nil || !status.Alive || status.Delay < 0 {
+			continue
+		}
+		if !found || status.Delay < bestDelay {
+			best = profile
+			bestDelay = status.Delay
+			found = true
+		}
+	}
+	return best, bestDelay, found
+}
+func (w *worker) startAutoMonitor(parent context.Context, instance *core.Instance, profiles []Profile, initial Profile) {
+	feature := instance.GetFeature(extension.ObservatoryType())
+	observer, ok := feature.(extension.Observatory)
+	if !ok {
+		w.logf("auto UI monitor unavailable; Xray leastPing balancer remains active")
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	w.autoCancel = cancel
+	w.autoWG.Add(1)
+	go func() {
+		defer w.autoWG.Done()
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		currentID := initial.ID
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				report, err := observer.GetObservation(ctx)
+				if err != nil {
+					continue
+				}
+				result, ok := report.(*observatory.ObservationResult)
+				if !ok {
+					continue
+				}
+				selected, delay, ok := bestObservedProfile(profiles, result.Status)
+				if !ok || selected.ID == currentID {
+					continue
+				}
+				previousID := currentID
+				currentID = selected.ID
+				w.setActiveProfile(selected)
+				w.logf("auto route changed previous_profile_id=%s profile_id=%s name=%q latency_ms=%d", previousID, selected.ID, selected.Name, delay)
+				w.send(map[string]any{
+					"event":     "profile",
+					"profile":   connectionInfoForProfile(selected),
+					"reason":    "auto-fallback",
+					"latencyMs": delay,
+				})
+			}
+		}
+	}()
+}
+func (w *worker) close() error {
+	w.stopAutoMonitor()
+	w.clearActiveProfile()
 	var closeErr error
 	if w.instance == nil {
 		if w.killSwitch != nil {
@@ -87,14 +190,40 @@ func (w *worker) close() error {
 	}
 	return closeErr
 }
-func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS []string, fragmentation, killSwitch bool) error {
+func profilesByID(profiles []Profile, ids []string) []Profile {
+	if len(ids) == 0 {
+		return profiles
+	}
+	allowed := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		allowed[id] = struct{}{}
+	}
+	result := make([]Profile, 0, len(ids))
+	for _, profile := range profiles {
+		if _, ok := allowed[profile.ID]; ok {
+			result = append(result, profile)
+		}
+	}
+	return result
+}
+
+func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoProfileIDs, directDomains []string, routeMode string, fragmentation, killSwitch bool) error {
 	w.logf("connect requested profile_id=%s", id)
 	validatedDNSID, dns, err := selectedDNS(dnsID, customDNS)
 	if err != nil {
 		w.logf("connect rejected: invalid DNS preset")
 		return err
 	}
-	w.logf("DNS selected id=%s name=%s; TLS fragmentation=%t; kill_switch=%t", validatedDNSID, dns.Name, fragmentation, killSwitch)
+	routing, routingErr := newRoutingOptions(routeMode, directDomains)
+	if routingErr != nil {
+		w.logf("connect rejected: invalid routing settings: %v", routingErr)
+		return routingErr
+	}
+	if killSwitch && routing.Mode != "full" {
+		w.logf("connect rejected: kill switch cannot be combined with split routing mode=%s", routing.Mode)
+		return errors.New("Kill Switch отключает прямой трафик, поэтому выключите его для выборочной маршрутизации")
+	}
+	w.logf("DNS selected id=%s name=%s; routing_mode=%s direct_domains=%d; TLS fragmentation=%t; kill_switch=%t", validatedDNSID, dns.Name, routing.Mode, len(routing.DirectDomains), fragmentation, killSwitch)
 	if runtime.GOOS != "windows" {
 		w.logf("connect rejected: unsupported platform=%s", runtime.GOOS)
 		return errors.New("Эта сборка клиента поддерживает TUN только на Windows")
@@ -102,22 +231,30 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS []stri
 	if w.instance != nil {
 		return errors.New("Сначала отключите текущее соединение")
 	}
-	w.activeProfile = connectionInfo{}
+	w.clearActiveProfile()
 	var selected *Profile
-	isAuto := id == autoProfileID
+	isAuto := isAutoProfileID(id)
 	var autoProfiles []Profile
 	var allowedEndpoints []proxyEndpoint
 	if isAuto {
-		w.logf("auto selection started profiles=%d", len(w.profiles))
-		results := pingProfiles(ctx, w.profiles)
-		_, best, ok := fastestProfile(w.profiles, results)
+		candidates := profilesByID(w.profiles, autoProfileIDs)
+		if id == autoNoRUProfileID {
+			candidates = withoutRussianProfiles(candidates)
+		}
+		if len(autoProfileIDs) > 0 && len(candidates) == 0 {
+			w.logf("auto group rejected: none of requested profiles exist requested=%d", len(autoProfileIDs))
+			return errors.New("В выбранном Auto не осталось подходящих серверов из текущей подписки")
+		}
+		w.logf("auto selection started profiles=%d restricted=%t", len(candidates), len(autoProfileIDs) > 0)
+		results := pingProfilesWithMethod(ctx, candidates, "auto")
+		_, best, ok := fastestProfile(candidates, results)
 		if !ok {
 			w.logf("auto selection failed: no reachable profiles")
-			return errors.New("Авто не нашёл доступных серверов. Запустите проверку TCP-пинга")
+			return errors.New("Авто не нашёл доступных серверов. Запустите проверку задержки")
 		}
 		prepareCtx, prepareCancel := context.WithTimeout(ctx, 12*time.Second)
 		var skipped []string
-		autoProfiles, allowedEndpoints, skipped, err = prepareAutoProfiles(prepareCtx, w.profiles, results)
+		autoProfiles, allowedEndpoints, skipped, err = prepareAutoProfiles(prepareCtx, candidates, results)
 		prepareCancel()
 		if err != nil {
 			w.logf("auto candidate preparation failed: %v", err)
@@ -171,19 +308,23 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS []stri
 			}
 		}
 		endpoint := net.JoinHostPort(resolved.Address, strconv.Itoa(resolved.Port))
-		w.logf("endpoint bootstrap TCP check started endpoint=%s candidate=%d/%d", endpoint, index+1, len(bootstrap.Candidates))
-		latency, pingErr = tcpPing(pingCtx, resolved.Address, resolved.Port)
+		w.logf("endpoint bootstrap check started protocol=%s endpoint=%s candidate=%d/%d", selected.Protocol, endpoint, index+1, len(bootstrap.Candidates))
+		if selected.Protocol == "hysteria" {
+			latency, _, pingErr = httpPingProfile(pingCtx, resolved, "head")
+		} else {
+			latency, pingErr = tcpPing(pingCtx, resolved.Address, resolved.Port)
+		}
 		if pingErr == nil {
 			bootstrap.SelectedAddress = candidate
-			w.logf("endpoint bootstrap TCP check passed endpoint=%s latency_ms=%d", endpoint, latency)
+			w.logf("endpoint bootstrap check passed protocol=%s endpoint=%s latency_ms=%d", selected.Protocol, endpoint, latency)
 			break
 		}
-		w.logf("endpoint bootstrap TCP candidate failed endpoint=%s error=%v", endpoint, pingErr)
+		w.logf("endpoint bootstrap candidate failed protocol=%s endpoint=%s error=%v", selected.Protocol, endpoint, pingErr)
 	}
 	pingCancel()
 	if pingErr != nil {
-		w.logf("endpoint bootstrap TCP check failed candidates=%s error=%v", strings.Join(bootstrap.Candidates, ","), pingErr)
-		return errors.New("VPN-сервер разрешён, но недоступен по TCP")
+		w.logf("endpoint bootstrap check failed protocol=%s candidates=%s error=%v", selected.Protocol, strings.Join(bootstrap.Candidates, ","), pingErr)
+		return errors.New("VPN-сервер разрешён, но не прошёл проверку доступности")
 	}
 	if isAuto {
 		autoProfiles[0] = resolved
@@ -205,9 +346,9 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS []stri
 	w.logf("creating Xray TUN configuration with pre-resolved endpoint=%s", bootstrap.SelectedAddress)
 	var config []byte
 	if isAuto {
-		config, e = makeAutoConfigWithOptions(autoProfiles, validatedDNSID, dns.Servers, fragmentation, outboundInterface)
+		config, e = makeAutoConfigWithRoutingOptions(autoProfiles, validatedDNSID, dns.Servers, fragmentation, outboundInterface, routing)
 	} else {
-		config, e = makeConfigWithOptions(resolved, validatedDNSID, dns.Servers, fragmentation, outboundInterface)
+		config, e = makeConfigWithRoutingOptions(resolved, validatedDNSID, dns.Servers, fragmentation, outboundInterface, routing)
 	}
 	if e != nil {
 		w.logf("configuration generation failed: %v", e)
@@ -272,11 +413,12 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS []stri
 		return errors.New("TUN запущен, но проверка интернета через сервер не прошла. Соединение отключено")
 	}
 	w.logf("connectivity probe passed; tunnel is ready")
-	if isAuto {
-		w.logf("continuous auto health monitor active candidates=%d interval=%s", len(autoProfiles), autoProbeInterval)
-	}
-	w.activeProfile = connectionInfoForProfile(*selected)
+	w.setActiveProfile(*selected)
 	w.setState("connected")
+	if isAuto {
+		w.logf("continuous auto fallback active candidates=%d interval=%s", len(autoProfiles), autoProbeInterval)
+		w.startAutoMonitor(ctx, instance, autoProfiles, *selected)
+	}
 	return nil
 }
 func main() {
@@ -321,6 +463,8 @@ func main() {
 			var result any = map[string]any{}
 			var err error
 			switch r.Method {
+			case "deviceInfo":
+				result = currentDeviceInfo()
 			case "publicIp":
 				w.logf("external IPv4 lookup requested masked=%t", r.Masked)
 				go func(id int, masked bool) {
@@ -338,38 +482,47 @@ func main() {
 				}(r.ID, r.Masked)
 				continue
 			case "import":
+				trigger := r.Reason
+				if trigger != "startup" && trigger != "automatic" {
+					trigger = "manual"
+				}
 				host := "invalid"
 				if parsed, parseErr := neturl.Parse(r.URL); parseErr == nil {
 					host = parsed.Hostname()
 				}
-				w.logf("subscription sync started host=%s", host)
+				w.logf("subscription sync started trigger=%s host=%s", trigger, host)
 				if w.instance != nil {
 					err = errors.New("Отключите VPN перед обновлением подписки")
 				} else {
 					var ps []Profile
-					ps, err = fetchSubscription(ctx, r.URL)
+					var skipped int
+					ps, skipped, err = fetchSubscription(ctx, r.URL)
 					if err == nil {
 						w.profiles = ps
-						result = profilesForRenderer(ps)
-						w.logf("subscription sync completed profiles=%d", len(ps))
+						result = map[string]any{"profiles": profilesForRenderer(ps), "skipped": skipped}
+						w.logf("subscription sync completed profiles=%d skipped_unsupported=%d", len(ps), skipped)
 					} else {
 						w.logf("subscription sync failed: %v", err)
 					}
 				}
 			case "connect":
-				err = w.connect(ctx, r.ProfileID, r.DNS, r.DNSServers, r.Fragment, r.KillSwitch)
+				err = w.connect(ctx, r.ProfileID, r.DNS, r.DNSServers, r.AutoProfileIDs, r.DirectDomains, r.RouteMode, r.Fragment, r.KillSwitch)
 				if err == nil {
-					result = w.activeProfile
+					result = w.currentActiveProfile()
 				}
 			case "ping":
-				w.logf("TCP latency test requested profiles=%d", len(w.profiles))
+				method := strings.ToLower(r.PingMethod)
+				if method != "head" && method != "get" {
+					method = "tcp"
+				}
+				w.logf("latency test requested method=%s profiles=%d", method, len(w.profiles))
 				if w.instance != nil {
-					err = errors.New("Отключите VPN перед проверкой TCP-пинга")
+					err = errors.New("Отключите VPN перед проверкой задержки")
 				} else if len(w.profiles) == 0 {
 					err = errors.New("Сначала добавьте подписку")
 				} else {
-					result = pingProfilesWithAuto(ctx, w.profiles)
-					w.logf("TCP latency test completed")
+					result = pingProfilesWithAutoMethod(ctx, w.profiles, method)
+					w.logf("latency test completed method=%s", method)
 				}
 			case "disconnect":
 				w.logf("disconnect requested")

@@ -16,6 +16,7 @@ use std::{
 type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
 type LogBuffer = Arc<Mutex<VecDeque<String>>>;
 type LogCallback = Arc<dyn Fn(String) + Send + Sync>;
+type ProfileCallback = Arc<dyn Fn(Value) + Send + Sync>;
 const MAX_LOG_LINES: usize = 1500;
 
 pub struct Backend {
@@ -90,6 +91,7 @@ impl Backend {
     pub fn spawn(
         executable: &Path,
         on_state: impl Fn(String) + Send + Sync + 'static,
+        on_profile: impl Fn(Value) + Send + Sync + 'static,
         on_log: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<Arc<Self>, String> {
         let mut command = Command::new(executable);
@@ -130,6 +132,7 @@ impl Backend {
             format!("[bridge] Go core process started pid={process_id}"),
         );
         let state_callback = Arc::new(on_state);
+        let profile_callback: ProfileCallback = Arc::new(on_profile);
         let stderr_logs = logs.clone();
         let stderr_callback = log_callback.clone();
         thread::spawn(move || {
@@ -159,6 +162,11 @@ impl Backend {
                     }) {
                         *state.lock().unwrap() = s.to_string();
                         state_callback(s.to_string());
+                    }
+                }
+                if msg["event"] == "profile" {
+                    if let Some(profile) = msg.get("profile").filter(|value| value.is_object()) {
+                        profile_callback(profile.clone());
                     }
                 }
                 if let Some(id) = msg["id"].as_u64() {
@@ -284,11 +292,22 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("shadowvpn-ipc-{}", std::process::id()));
         fs::create_dir_all(&folder).unwrap();
         let file = folder.join("fake-core");
-        fs::write(&file, "#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'event':'ready'}),flush=True)\nfor line in sys.stdin:\n r=json.loads(line)\n print(json.dumps({'event':'state','state':'connected'}),flush=True)\n print(json.dumps({'id':r['id'],'ok':r['method']!='bad','result':{'value':42},'error':'expected'}),flush=True)\n").unwrap();
+        fs::write(&file, "#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'event':'ready'}),flush=True)\nfor line in sys.stdin:\n r=json.loads(line)\n print(json.dumps({'event':'state','state':'connected'}),flush=True)\n print(json.dumps({'event':'profile','profile':{'profileId':'server','name':'Berlin'}}),flush=True)\n print(json.dumps({'id':r['id'],'ok':r['method']!='bad','result':{'value':42},'error':'expected'}),flush=True)\n").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o700)).unwrap();
-        let backend = Backend::spawn(&file, |_| {}, |_| {}).unwrap();
+        let selected = Arc::new(Mutex::new(Value::Null));
+        let selected_callback = selected.clone();
+        let backend = Backend::spawn(
+            &file,
+            |_| {},
+            move |profile| {
+                *selected_callback.lock().unwrap() = profile;
+            },
+            |_| {},
+        )
+        .unwrap();
         assert_eq!(backend.request("test", json!({})).unwrap()["value"], 42);
         assert_eq!(&*backend.state.lock().unwrap(), "connected");
+        assert_eq!(selected.lock().unwrap()["profileId"], "server");
         assert_eq!(backend.request("bad", json!({})).unwrap_err(), "expected");
         backend.shutdown().unwrap();
         assert!(backend.request("test", json!({})).is_err());

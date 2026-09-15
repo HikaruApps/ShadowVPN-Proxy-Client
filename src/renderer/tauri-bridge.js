@@ -3,6 +3,7 @@
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
   const subscribers = new Set();
+  const profileSubscribers = new Set();
   const logSubscribers = new Set();
   const ready = listen('vpn:state', event => {
     for (const callback of subscribers) callback(event.payload);
@@ -10,6 +11,9 @@
   listen('vpn:error', event => {
     document.getElementById('statusText').textContent = event.payload;
     document.getElementById('subscriptionError').textContent = event.payload;
+  }).catch(() => {});
+  listen('vpn:profile', event => {
+    for (const callback of profileSubscribers) callback(event.payload);
   }).catch(() => {});
   listen('vpn:log', event => {
     for (const callback of logSubscribers) callback(event.payload);
@@ -19,15 +23,19 @@
     catch (error) { return { ok: false, error: String(error) }; }
   }
   window.vpnApi = Object.freeze({
-    importSubscription: url => call('vpn_import', { url }),
-    connect: (profileId, dns = 'cloudflare', dnsServers = [], fragmentation = false, killSwitch = false) => call('vpn_connect', { profileId, dns, dnsServers, fragmentation, killSwitch }),
+    importSubscription: (url, reason = 'manual') => call('vpn_import', { url, reason }),
+    connect: (profileId, dns = 'cloudflare', dnsServers = [], fragmentation = false, killSwitch = false, autoProfileIds = [], routeMode = 'full', directDomains = []) => call('vpn_connect', { profileId, dns, dnsServers, fragmentation, killSwitch, autoProfileIds, routeMode, directDomains }),
     disconnect: () => call('vpn_disconnect'),
-    ping: () => call('vpn_ping'),
+    ping: (pingMethod = 'tcp') => call('vpn_ping', { pingMethod }),
     publicIp: (masked = false) => call('vpn_public_ip', { masked }),
+    deviceInfo: () => call('vpn_device_info'),
+    getAutoStart: () => call('vpn_get_autostart'),
+    setAutoStart: enabled => call('vpn_set_autostart', { enabled }),
     getState: async () => { await ready; return invoke('vpn_get_state'); },
     getLogs: () => call('vpn_get_logs'),
     clearLogs: () => call('vpn_clear_logs'),
     onStateChange: callback => { subscribers.add(callback); return () => subscribers.delete(callback); },
+    onProfileChange: callback => { profileSubscribers.add(callback); return () => profileSubscribers.delete(callback); },
     onLog: callback => { logSubscribers.add(callback); return () => logSubscribers.delete(callback); },
   });
 })();

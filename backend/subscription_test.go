@@ -70,6 +70,110 @@ func TestDuplicateProfiles(t *testing.T) {
 	}
 }
 
+func TestMixedURISubscriptionSkipsUnsupportedProtocols(t *testing.T) {
+	skipped := 0
+	profiles, err := parseSubscriptionWithStats([]byte("ss://ignored@example.com:443#Legacy\n"+sample+"\nhysteria2://secret@example.com:443?sni=cover.example&alpn=h3#Fast"), &skipped)
+	if err != nil || len(profiles) != 2 || profiles[0].Name != "Poland" || profiles[1].Protocol != "hysteria" || skipped != 1 {
+		t.Fatalf("mixed subscription was not filtered: profiles=%#v skipped=%d err=%v", profiles, skipped, err)
+	}
+	if _, err := parseSubscription([]byte("ss://ignored@example.com:443#Legacy")); err == nil {
+		t.Fatal("unsupported-only subscription was accepted")
+	}
+}
+
+func TestHysteria2URIProducesXrayConfig(t *testing.T) {
+	profile, err := parseURI("hy2://secret@example.com:443?sni=cover.example&alpn=h3&pinSHA256=e8e2d387fdbffeb38e9c9065cf30a97ee23c0e3d32ee6f78ffae40966befccc9#Hysteria")
+	if err != nil || profile.Protocol != "hysteria" || profile.Transport != "hysteria" || profile.Address != "example.com" {
+		t.Fatalf("wrong Hysteria profile: %#v err=%v", profile, err)
+	}
+	config, err := makeConfig(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = core.LoadConfig("json", bytes.NewReader(config)); err != nil {
+		t.Fatalf("Xray rejected Hysteria config: %v", err)
+	}
+	text := string(config)
+	if !strings.Contains(text, `"protocol":"hysteria"`) || !strings.Contains(text, `"auth":"secret"`) || !strings.Contains(text, `"network":"hysteria"`) || !strings.Contains(text, `"pinnedPeerCertSha256"`) {
+		t.Fatalf("Hysteria config incomplete: %s", text)
+	}
+}
+
+func TestHysteria2RejectsRemovedAllowInsecureMode(t *testing.T) {
+	if _, err := parseURI("hysteria2://secret@example.com:443?insecure=1#Legacy"); err == nil || !strings.Contains(err.Error(), "pinSHA256") {
+		t.Fatalf("Hysteria insecure profile was not rejected safely: %v", err)
+	}
+}
+
+func TestDomainRoutingModesProduceSafeRules(t *testing.T) {
+	profile, err := parseURI(sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing, err := newRoutingOptions("bypass", []string{" example.com ", "full:private.example.com", "keyword:chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := makeConfigWithRoutingOptions(profile, "cloudflare", nil, false, "auto", routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = core.LoadConfig("json", bytes.NewReader(config)); err != nil {
+		t.Fatalf("Xray rejected domain routing config: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(config, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	rules, _ := decoded["routing"].(map[string]any)
+	routingRules, _ := rules["rules"].([]any)
+	if len(routingRules) != 1 {
+		t.Fatalf("unexpected routing rules: %#v", routingRules)
+	}
+	firstRule, _ := routingRules[0].(map[string]any)
+	if firstRule["outboundTag"] != "direct" {
+		t.Fatalf("bypass rule does not use direct outbound: %#v", firstRule)
+	}
+	if _, err := newRoutingOptions("proxy_only", nil); err == nil {
+		t.Fatal("proxy_only without domains was accepted")
+	}
+	if full, err := newRoutingOptions("full", []string{"example.com"}); err != nil || len(full.DirectDomains) != 0 {
+		t.Fatalf("full mode should ignore saved domain rules: %#v err=%v", full, err)
+	}
+}
+
+func TestAutoDomainRoutingKeepsBalancerFallback(t *testing.T) {
+	profile, err := parseURI(sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routing, err := newRoutingOptions("proxy_only", []string{"domain:example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := makeAutoConfigWithRoutingOptions([]Profile{profile}, "cloudflare", nil, false, "auto", routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = core.LoadConfig("json", bytes.NewReader(config)); err != nil {
+		t.Fatalf("Xray rejected Auto domain routing config: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(config, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	routingConfig, _ := decoded["routing"].(map[string]any)
+	rules, _ := routingConfig["rules"].([]any)
+	if len(rules) != 2 {
+		t.Fatalf("unexpected Auto proxy-only rules: %#v", rules)
+	}
+	first, _ := rules[0].(map[string]any)
+	second, _ := rules[1].(map[string]any)
+	if first["balancerTag"] != "shadow-auto" || second["outboundTag"] != "direct" {
+		t.Fatalf("Auto domain rule lost balancer/direct fallback: %#v", rules)
+	}
+}
+
 func TestServiceProfilesWithUnspecifiedAddressAreHidden(t *testing.T) {
 	serviceIPv4 := strings.Replace(sample, "example.com:443", "0.0.0.0:443", 1)
 	serviceIPv6 := strings.Replace(sample, "example.com:443", "[::]:443", 1)

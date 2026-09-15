@@ -8,6 +8,8 @@ use std::sync::{
 };
 use tauri::{Emitter, Manager, State};
 
+const AUTOSTART_TASK_NAME: &str = "ShadowVPN Auto Start";
+
 struct Service(Result<Arc<Backend>, String>);
 #[derive(Default)]
 struct Closing {
@@ -28,11 +30,16 @@ async fn query(service: &Service, method: &'static str, data: Value) -> Result<V
         .map_err(|_| "Ошибка потока ядра".to_string())?
 }
 #[tauri::command]
-async fn vpn_import(url: String, service: State<'_, Service>) -> Result<Value, String> {
+async fn vpn_import(url: String, reason: Option<String>, service: State<'_, Service>) -> Result<Value, String> {
     if url.len() > 8192 || !url.starts_with("https://") {
         return Err("Нужна HTTPS-ссылка на подписку".into());
     }
-    call(&service, "import", json!({"url":url})).await
+    let reason = match reason.as_deref() {
+        Some("startup") => "startup",
+        Some("automatic") => "automatic",
+        _ => "manual",
+    };
+    call(&service, "import", json!({"url":url,"reason":reason})).await
 }
 #[tauri::command]
 async fn vpn_connect(
@@ -41,16 +48,39 @@ async fn vpn_connect(
     dns_servers: Option<Vec<String>>,
     fragmentation: Option<bool>,
     kill_switch: Option<bool>,
+    auto_profile_ids: Option<Vec<String>>,
+    route_mode: Option<String>,
+    direct_domains: Option<Vec<String>>,
     service: State<'_, Service>,
 ) -> Result<Value, String> {
     if profile_id.len() != 24 || !profile_id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Выберите сервер".into());
     }
+    let auto_profile_ids = auto_profile_ids.unwrap_or_default();
+    let route_mode = route_mode.unwrap_or_else(|| "full".into());
+    if !["full", "bypass", "proxy_only"].contains(&route_mode.as_str()) {
+        return Err("Неизвестный режим маршрутизации".into());
+    }
+    let direct_domains = direct_domains.unwrap_or_default();
+    if direct_domains.len() > 512 || direct_domains.iter().any(|domain| domain.len() > 255) {
+        return Err("Слишком много правил маршрутизации".into());
+    }
+    if auto_profile_ids.len() > 512
+        || auto_profile_ids.iter().any(|id| id.len() != 24 || !id.bytes().all(|b| b.is_ascii_hexdigit()) || id.bytes().all(|b| b == b'0'))
+    {
+        return Err("Некорректный состав Auto-группы".into());
+    }
+    if profile_id != "000000000000000000000000"
+        && profile_id != "000000000000000000000001"
+        && !auto_profile_ids.is_empty()
+    {
+        return Err("Группу можно использовать только с Auto".into());
+    }
     let (dns, dns_servers) = validate_dns_request(dns, dns_servers)?;
     call(
         &service,
         "connect",
-        json!({"profileId":profile_id,"dns":dns,"dnsServers":dns_servers,"fragmentation":fragmentation.unwrap_or(false),"killSwitch":kill_switch.unwrap_or(false)}),
+        json!({"profileId":profile_id,"dns":dns,"dnsServers":dns_servers,"fragmentation":fragmentation.unwrap_or(false),"killSwitch":kill_switch.unwrap_or(false),"autoProfileIds":auto_profile_ids,"routeMode":route_mode,"directDomains":direct_domains}),
     )
     .await
 }
@@ -59,12 +89,59 @@ async fn vpn_disconnect(service: State<'_, Service>) -> Result<Value, String> {
     call(&service, "disconnect", json!({})).await
 }
 #[tauri::command]
-async fn vpn_ping(service: State<'_, Service>) -> Result<Value, String> {
-    call(&service, "ping", json!({})).await
+async fn vpn_ping(ping_method: Option<String>, service: State<'_, Service>) -> Result<Value, String> {
+    let ping_method = match ping_method.as_deref() {
+        Some("head") => "head",
+        Some("get") => "get",
+        _ => "tcp",
+    };
+    call(&service, "ping", json!({"pingMethod":ping_method})).await
 }
 #[tauri::command]
 async fn vpn_public_ip(masked: bool, service: State<'_, Service>) -> Result<Value, String> {
     query(&service, "publicIp", json!({"masked":masked})).await
+}
+#[tauri::command]
+async fn vpn_device_info(service: State<'_, Service>) -> Result<Value, String> {
+    query(&service, "deviceInfo", json!({})).await
+}
+#[tauri::command]
+fn vpn_get_autostart() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        return Ok(std::process::Command::new("schtasks.exe")
+            .args(["/Query", "/TN", AUTOSTART_TASK_NAME])
+            .output()
+            .map_err(|_| "Не удалось проверить автозапуск Windows".to_string())?
+            .status
+            .success());
+    }
+    #[cfg(not(windows))]
+    Err("Автозапуск поддерживается только в Windows".into())
+}
+#[tauri::command]
+fn vpn_set_autostart(enabled: bool) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        let output = if enabled {
+            let executable = std::env::current_exe().map_err(|_| "Не удалось определить путь ShadowVPN".to_string())?;
+            let command = format!("\"{}\"", executable.display());
+            std::process::Command::new("schtasks.exe")
+                .args(["/Create", "/TN", AUTOSTART_TASK_NAME, "/SC", "ONLOGON", "/TR", &command, "/RL", "HIGHEST", "/F"])
+                .output()
+        } else {
+            std::process::Command::new("schtasks.exe")
+                .args(["/Delete", "/TN", AUTOSTART_TASK_NAME, "/F"])
+                .output()
+        }
+        .map_err(|_| "Не удалось изменить автозапуск Windows".to_string())?;
+        if !output.status.success() {
+            return Err("Windows не разрешила изменить автозапуск".into());
+        }
+        Ok(enabled)
+    }
+    #[cfg(not(windows))]
+    Err("Автозапуск поддерживается только в Windows".into())
 }
 #[tauri::command]
 fn vpn_get_state(service: State<'_, Service>) -> String {
@@ -136,11 +213,15 @@ fn main() {
                 app.path().resource_dir()?.join("bin")
             };
             let state_handle = app.handle().clone();
+            let profile_handle = app.handle().clone();
             let log_handle = app.handle().clone();
             let service = Backend::spawn(
                 &directory.join(name),
                 move |state| {
                     let _ = state_handle.emit("vpn:state", state);
+                },
+                move |profile| {
+                    let _ = profile_handle.emit("vpn:profile", profile);
                 },
                 move |line| {
                     let _ = log_handle.emit("vpn:log", line);
@@ -155,6 +236,9 @@ fn main() {
             vpn_disconnect,
             vpn_ping,
             vpn_public_ip,
+            vpn_device_info,
+            vpn_get_autostart,
+            vpn_set_autostart,
             vpn_get_state,
             vpn_get_logs,
             vpn_clear_logs

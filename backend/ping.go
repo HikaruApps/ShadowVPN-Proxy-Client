@@ -1,13 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/xtls/xray-core/core"
 )
 
 type PingResult struct {
@@ -20,6 +29,10 @@ type PingResult struct {
 func endpointFromOutbound(out map[string]any) (string, int) {
 	settings, _ := out["settings"].(map[string]any)
 	protocol, _ := out["protocol"].(string)
+	if protocol == "hysteria" {
+		address, _ := settings["address"].(string)
+		return address, integerValue(settings["port"])
+	}
 	key := "servers"
 	if protocol == "vless" || protocol == "vmess" {
 		key = "vnext"
@@ -81,11 +94,100 @@ func tcpPingEndpoint(ctx context.Context, address string, port int) (int64, stri
 }
 
 func pingProfiles(parent context.Context, profiles []Profile) []PingResult {
+	return pingProfilesWithMethod(parent, profiles, "tcp")
+}
+
+func httpPingProfile(ctx context.Context, profile Profile, method string) (int64, string, error) {
+	resolved, bootstrap, err := resolveProfileEndpoint(ctx, profile)
+	if err != nil {
+		return 0, "", err
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, "", err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	_ = listener.Close()
+	tokenBytes := make([]byte, 16)
+	if _, err = rand.Read(tokenBytes); err != nil {
+		return 0, "", err
+	}
+	probePassword := hex.EncodeToString(tokenBytes)
+	outbound, err := configuredOutbound(resolved, "probe", false)
+	if err != nil {
+		return 0, "", err
+	}
+	config, err := json.Marshal(map[string]any{
+		"log": map[string]any{"loglevel": "none"},
+		"inbounds": []any{map[string]any{
+			"tag": "probe-in", "listen": "127.0.0.1", "port": port, "protocol": "http",
+			"settings": map[string]any{
+				"timeout": 8,
+				"accounts": []any{map[string]any{"user": "shadowvpn", "pass": probePassword}},
+			},
+		}},
+		"outbounds": []any{outbound},
+	})
+	if err != nil {
+		return 0, "", err
+	}
+	parsed, err := core.LoadConfig("json", bytes.NewReader(config))
+	if err != nil {
+		return 0, "", err
+	}
+	instance, err := core.New(parsed)
+	if err != nil {
+		return 0, "", err
+	}
+	defer instance.Close()
+	if err = instance.Start(); err != nil {
+		return 0, "", err
+	}
+	proxyURL := &url.URL{
+		Scheme: "http",
+		Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+		User: url.UserPassword("shadowvpn", probePassword),
+	}
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL), DisableKeepAlives: true,
+		DialContext: (&net.Dialer{Timeout: 4 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 7 * time.Second,
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 9 * time.Second}
+	request, err := http.NewRequestWithContext(ctx, strings.ToUpper(method), "https://www.gstatic.com/generate_204", nil)
+	if err != nil {
+		return 0, "", err
+	}
+	request.Header.Set("User-Agent", "shadowvpn-probe/1")
+	started := time.Now()
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, "", err
+	}
+	defer response.Body.Close()
+	if method == "get" {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 500 {
+		return 0, "", fmt.Errorf("probe returned HTTP %d", response.StatusCode)
+	}
+	latency := time.Since(started).Milliseconds()
+	if latency < 1 {
+		latency = 1
+	}
+	return latency, bootstrap.SelectedAddress, nil
+}
+
+func pingProfilesWithMethod(parent context.Context, profiles []Profile, method string) []PingResult {
 	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
 	results := make([]PingResult, len(profiles))
 	jobs := make(chan int)
 	workers := 32
+	if method != "tcp" {
+		workers = 6
+	}
 	if len(profiles) < workers {
 		workers = len(profiles)
 	}
@@ -96,7 +198,22 @@ func pingProfiles(parent context.Context, profiles []Profile) []PingResult {
 			defer group.Done()
 			for index := range jobs {
 				profile := profiles[index]
-				latency, resolvedAddress, err := tcpPingEndpoint(ctx, profile.Address, profile.Port)
+				probeMethod := method
+				if probeMethod == "auto" {
+					if profile.Protocol == "hysteria" {
+						probeMethod = "head"
+					} else {
+						probeMethod = "tcp"
+					}
+				}
+				var latency int64
+				var resolvedAddress string
+				var err error
+				if probeMethod == "head" || probeMethod == "get" {
+					latency, resolvedAddress, err = httpPingProfile(ctx, profile, probeMethod)
+				} else {
+					latency, resolvedAddress, err = tcpPingEndpoint(ctx, profile.Address, profile.Port)
+				}
 				results[index] = PingResult{ID: profile.ID, LatencyMS: latency, Available: err == nil, ResolvedAddress: resolvedAddress}
 			}
 		}()

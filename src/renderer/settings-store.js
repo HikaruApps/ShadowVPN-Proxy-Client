@@ -3,6 +3,24 @@
   const customDNSStorageKey = "shadowvpn.customDns";
   const fragmentationStorageKey = "shadowvpn.fragmentation";
   const killSwitchStorageKey = "shadowvpn.killSwitch";
+  const autoUpdateStorageKey = "shadowvpn.subscriptionAutoUpdate";
+  const lastSubscriptionSyncStorageKey = "shadowvpn.subscriptionLastSync";
+  const pingMethodStorageKey = "shadowvpn.pingMethod";
+  const pingOnOpenStorageKey = "shadowvpn.pingOnOpen";
+  const routingModeStorageKey = "shadowvpn.routingMode";
+  const routingDomainsStorageKey = "shadowvpn.routingDomains";
+  const pingMethods = Object.freeze([
+    Object.freeze({ id: "tcp", name: "TCP", detail: "быстрая проверка порта" }),
+    Object.freeze({ id: "head", name: "HTTP HEAD", detail: "реальный запрос через сервер" }),
+    Object.freeze({ id: "get", name: "HTTP GET", detail: "полная проверка через сервер" }),
+  ]);
+  const autoUpdateIntervals = Object.freeze([
+    Object.freeze({ id: "15", name: "Каждые 15 минут", minutes: 15 }),
+    Object.freeze({ id: "60", name: "Каждый час", minutes: 60 }),
+    Object.freeze({ id: "360", name: "Каждые 6 часов", minutes: 360 }),
+    Object.freeze({ id: "1440", name: "Раз в сутки", minutes: 1440 }),
+    Object.freeze({ id: "off", name: "Выключено", minutes: 0 }),
+  ]);
   const dnsProviders = Object.freeze([
     Object.freeze({ id: "cloudflare", name: "Cloudflare", detail: "1.1.1.1" }),
     Object.freeze({ id: "google", name: "Google", detail: "8.8.8.8" }),
@@ -86,6 +104,92 @@
     return enabled;
   }
 
+  function normalizeAutoUpdate(value) {
+    return autoUpdateIntervals.some(item => item.id === value) ? value : "60";
+  }
+
+  function readAutoUpdate(storage = window.localStorage) {
+    try { return normalizeAutoUpdate(storage.getItem(autoUpdateStorageKey)); }
+    catch { return "60"; }
+  }
+
+  function writeAutoUpdate(value, storage = window.localStorage) {
+    const normalized = normalizeAutoUpdate(value);
+    try { storage.setItem(autoUpdateStorageKey, normalized); } catch { /* Keep the session value. */ }
+    return normalized;
+  }
+
+  function readLastSubscriptionSync(storage = window.localStorage, now = Date.now()) {
+    try {
+      const value = Number(storage.getItem(lastSubscriptionSyncStorageKey));
+      return Number.isFinite(value) && value > 0 && value <= now + 300000 ? value : 0;
+    } catch { return 0; }
+  }
+
+  function writeLastSubscriptionSync(value = Date.now(), storage = window.localStorage) {
+    const normalized = Number.isFinite(Number(value)) && Number(value) > 0 ? Math.floor(Number(value)) : Date.now();
+    try { storage.setItem(lastSubscriptionSyncStorageKey, String(normalized)); } catch { /* Scheduling still works for this session. */ }
+    return normalized;
+  }
+
+  function normalizePingMethod(value) {
+    return pingMethods.some(item => item.id === value) ? value : "tcp";
+  }
+
+  function readPingMethod(storage = window.localStorage) {
+    try { return normalizePingMethod(storage.getItem(pingMethodStorageKey)); }
+    catch { return "tcp"; }
+  }
+
+  function writePingMethod(value, storage = window.localStorage) {
+    const normalized = normalizePingMethod(value);
+    try { storage.setItem(pingMethodStorageKey, normalized); } catch { /* Keep the session value. */ }
+    return normalized;
+  }
+
+  function readPingOnOpen(storage = window.localStorage) {
+    try { return storage.getItem(pingOnOpenStorageKey) === "true"; }
+    catch { return false; }
+  }
+
+  function writePingOnOpen(value, storage = window.localStorage) {
+    const enabled = Boolean(value);
+    try { storage.setItem(pingOnOpenStorageKey, String(enabled)); } catch { /* Keep the session value. */ }
+    return enabled;
+  }
+
+  const routingModes = Object.freeze([
+    Object.freeze({ id: "full", name: "Весь трафик через VPN", detail: "Стандартный режим ShadowVPN" }),
+    Object.freeze({ id: "bypass", name: "Выбранные домены напрямую", detail: "Остальное идёт через VPN" }),
+    Object.freeze({ id: "proxy_only", name: "Только выбранные домены через VPN", detail: "Остальное подключается напрямую" }),
+  ]);
+
+  function normalizeRoutingMode(value) {
+    return routingModes.some(item => item.id === value) ? value : "full";
+  }
+
+  function readRoutingMode(storage = window.localStorage) {
+    try { return normalizeRoutingMode(storage.getItem(routingModeStorageKey)); }
+    catch { return "full"; }
+  }
+
+  function writeRoutingMode(value, storage = window.localStorage) {
+    const normalized = normalizeRoutingMode(value);
+    try { storage.setItem(routingModeStorageKey, normalized); } catch { /* Keep the session value. */ }
+    return normalized;
+  }
+
+  function readRoutingDomains(storage = window.localStorage) {
+    try { return String(storage.getItem(routingDomainsStorageKey) || "").slice(0, 12000); }
+    catch { return ""; }
+  }
+
+  function writeRoutingDomains(value, storage = window.localStorage) {
+    const normalized = String(value || "").slice(0, 12000);
+    try { storage.setItem(routingDomainsStorageKey, normalized); } catch { /* Keep the session value. */ }
+    return normalized;
+  }
+
   function validIPv4(value) {
     const parts = value.split(".");
     if (parts.length !== 4 || !parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)) return false;
@@ -124,6 +228,24 @@
     writeFragmentation,
     readKillSwitch,
     writeKillSwitch,
+    autoUpdateIntervals,
+    normalizeAutoUpdate,
+    readAutoUpdate,
+    writeAutoUpdate,
+    readLastSubscriptionSync,
+    writeLastSubscriptionSync,
+    pingMethods,
+    normalizePingMethod,
+    readPingMethod,
+    writePingMethod,
+    readPingOnOpen,
+    writePingOnOpen,
+    routingModes,
+    normalizeRoutingMode,
+    readRoutingMode,
+    writeRoutingMode,
+    readRoutingDomains,
+    writeRoutingDomains,
     parseCustomDNS,
   });
 })();

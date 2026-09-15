@@ -61,10 +61,10 @@ func decodeBase64(s string) ([]byte, error) {
 	}
 	return nil, errors.New("Некорректный Base64")
 }
-func fetchSubscription(ctx context.Context, address string) ([]Profile, error) {
+func fetchSubscription(ctx context.Context, address string) ([]Profile, int, error) {
 	u, e := url.Parse(address)
 	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
-		return nil, errors.New("Нужна HTTPS-ссылка на подписку")
+		return nil, 0, errors.New("Нужна HTTPS-ссылка на подписку")
 	}
 	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 		if len(via) >= 5 || r.URL.Scheme != "https" || r.URL.User != nil {
@@ -74,28 +74,34 @@ func fetchSubscription(ctx context.Context, address string) ([]Profile, error) {
 	}}
 	req, e := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if e != nil {
-		return nil, errors.New("Некорректная ссылка")
+		return nil, 0, errors.New("Некорректная ссылка")
 	}
-	req.Header.Set("User-Agent", "v2rayN/7.0 ShadowVPN/0.10.0")
+	setClientIdentityHeaders(req, currentDeviceInfo())
 	req.Header.Set("Accept", "application/json, text/plain;q=0.9")
 	resp, e := client.Do(req)
 	if e != nil {
-		return nil, errors.New("Не удалось загрузить подписку. Проверьте интернет и ссылку")
+		return nil, 0, errors.New("Не удалось загрузить подписку. Проверьте интернет и ссылку")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Сервер подписки вернул HTTP %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("Сервер подписки вернул HTTP %d", resp.StatusCode)
 	}
 	b, e := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
 	if e != nil {
-		return nil, errors.New("Ошибка чтения подписки")
+		return nil, 0, errors.New("Ошибка чтения подписки")
 	}
 	if len(b) > 4*1024*1024 {
-		return nil, errors.New("Подписка превышает 4 МБ")
+		return nil, 0, errors.New("Подписка превышает 4 МБ")
 	}
-	return parseSubscription(b)
+	skipped := 0
+	profiles, err := parseSubscriptionWithStats(b, &skipped)
+	return profiles, skipped, err
 }
 func parseSubscription(b []byte) ([]Profile, error) {
+	return parseSubscriptionWithStats(b, nil)
+}
+
+func parseSubscriptionWithStats(b []byte, skippedUnsupported *int) ([]Profile, error) {
 	s := strings.TrimSpace(strings.TrimPrefix(string(b), "\ufeff"))
 	profiles := []Profile{}
 	if strings.HasPrefix(s, "[") || strings.HasPrefix(s, "{") {
@@ -124,7 +130,7 @@ func parseSubscription(b []byte) ([]Profile, error) {
 				}
 				proto, _ := out["protocol"].(string)
 				switch proto {
-				case "vless", "vmess", "trojan", "shadowsocks":
+				case "vless", "vmess", "trojan", "shadowsocks", "hysteria":
 				default:
 					continue
 				}
@@ -159,6 +165,12 @@ func parseSubscription(b []byte) ([]Profile, error) {
 			if strings.HasPrefix(line, "#") {
 				continue
 			}
+			if parsed, parseErr := url.Parse(line); parseErr == nil && parsed.Scheme != "vless" && parsed.Scheme != "trojan" && parsed.Scheme != "hysteria2" && parsed.Scheme != "hy2" {
+				if skippedUnsupported != nil {
+					(*skippedUnsupported)++
+				}
+				continue
+			}
 			p, e := parseURI(line)
 			if e != nil {
 				return nil, e
@@ -176,7 +188,7 @@ func parseSubscription(b []byte) ([]Profile, error) {
 	}
 	profiles = visible
 	if len(profiles) == 0 {
-		return nil, errors.New("Нет поддерживаемых серверов. Нужна Xray JSON или подписка VLESS/Trojan")
+		return nil, errors.New("Нет поддерживаемых серверов. Нужна Xray JSON или подписка VLESS/Trojan/Hysteria2")
 	}
 	if len(profiles) > 500 {
 		return nil, errors.New("В подписке больше 500 серверов")
@@ -196,7 +208,7 @@ func parseURI(raw string) (Profile, error) {
 	if e != nil || u.User == nil || u.Hostname() == "" {
 		return Profile{}, errors.New("Некорректная ссылка сервера")
 	}
-	if u.Scheme != "vless" && u.Scheme != "trojan" {
+	if u.Scheme != "vless" && u.Scheme != "trojan" && u.Scheme != "hysteria2" && u.Scheme != "hy2" {
 		return Profile{}, fmt.Errorf("URI-протокол %s пока не поддерживается; используйте Xray JSON", u.Scheme)
 	}
 	port, e := strconv.Atoi(u.Port())
@@ -204,6 +216,54 @@ func parseURI(raw string) (Profile, error) {
 		return Profile{}, errors.New("Некорректный порт сервера")
 	}
 	q := u.Query()
+	if u.Scheme == "hysteria2" || u.Scheme == "hy2" {
+		if q.Get("obfs") != "" || q.Get("obfs-password") != "" {
+			return Profile{}, errors.New("Hysteria2 obfs пока не поддерживается")
+		}
+		password := u.User.Username()
+		if suffix, exists := u.User.Password(); exists {
+			password += ":" + suffix
+		}
+		if password == "" {
+			return Profile{}, errors.New("Hysteria2 требует пароль")
+		}
+		serverName := q.Get("sni")
+		if serverName == "" {
+			serverName = u.Hostname()
+		}
+		alpn := []string{"h3"}
+		if q.Get("alpn") != "" {
+			alpn = strings.Split(q.Get("alpn"), ",")
+		}
+		certificatePin := strings.TrimSpace(q.Get("pinSHA256"))
+		if certificatePin == "" {
+			certificatePin = strings.TrimSpace(q.Get("pcs"))
+		}
+		insecure := q.Get("insecure") == "1" || strings.EqualFold(q.Get("insecure"), "true")
+		if insecure && certificatePin == "" {
+			return Profile{}, errors.New("Hysteria2 insecure=1 больше не поддерживается Xray; добавьте pinSHA256 сертификата")
+		}
+		tlsSettings := map[string]any{"serverName": serverName, "alpn": alpn}
+		if certificatePin != "" {
+			tlsSettings["pinnedPeerCertSha256"] = certificatePin
+		}
+		if verifyName := strings.TrimSpace(q.Get("vcn")); verifyName != "" {
+			tlsSettings["verifyPeerCertByName"] = verifyName
+		}
+		stream := map[string]any{
+			"network":  "hysteria",
+			"security": "tls",
+			"tlsSettings": tlsSettings,
+			"hysteriaSettings": map[string]any{"version": 2, "auth": password},
+		}
+		out := map[string]any{
+			"tag":      "proxy",
+			"protocol": "hysteria",
+			"settings": map[string]any{"version": 2, "address": u.Hostname(), "port": port},
+			"streamSettings": stream,
+		}
+		return newProfile(u.Fragment, out), nil
+	}
 	security := q.Get("security")
 	if security == "" {
 		if u.Scheme == "trojan" {
@@ -280,6 +340,73 @@ func makeConfigWithDNS(p Profile, dnsID string, customServers []string) ([]byte,
 }
 
 func makeConfigWithOptions(p Profile, dnsID string, customServers []string, fragmentation bool, outboundInterface string) ([]byte, error) {
+	return makeConfigWithRoutingOptions(p, dnsID, customServers, fragmentation, outboundInterface, routingOptions{})
+}
+
+type routingOptions struct {
+	Mode          string
+	DirectDomains []string
+}
+
+func newRoutingOptions(mode string, directDomains []string) (routingOptions, error) {
+	if mode == "" {
+		mode = "full"
+	}
+	if mode != "full" && mode != "bypass" && mode != "proxy_only" {
+		return routingOptions{}, errors.New("Неизвестный режим маршрутизации")
+	}
+	normalized := make([]string, 0, len(directDomains))
+	seen := make(map[string]struct{}, len(directDomains))
+	for _, raw := range directDomains {
+		for _, item := range strings.Fields(strings.ReplaceAll(raw, ",", "\n")) {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if len(item) > 255 || strings.ContainsAny(item, "\\\"'") {
+				return routingOptions{}, errors.New("Правило маршрутизации содержит недопустимый домен")
+			}
+			prefix := "domain:"
+			value := item
+			for _, candidate := range []string{"domain:", "full:", "keyword:", "regexp:"} {
+				if strings.HasPrefix(strings.ToLower(value), candidate) {
+					prefix = candidate
+					value = value[len(candidate):]
+					break
+				}
+			}
+			value = strings.TrimSpace(value)
+			if value == "" || strings.ContainsAny(value, " \t\r\n") {
+				return routingOptions{}, errors.New("Правило маршрутизации содержит пустой или недопустимый домен")
+			}
+			if prefix == "domain:" {
+				value = strings.TrimSuffix(strings.ToLower(value), ".")
+				if strings.Contains(value, "/") || strings.Contains(value, ":") || !strings.Contains(value, ".") {
+					return routingOptions{}, errors.New("Укажите домен вроде example.com или используйте full:/keyword:")
+				}
+			}
+			normalizedItem := prefix + value
+			if _, exists := seen[normalizedItem]; exists {
+				continue
+			}
+			seen[normalizedItem] = struct{}{}
+			normalized = append(normalized, normalizedItem)
+			if len(normalized) > 512 {
+				return routingOptions{}, errors.New("Можно добавить не больше 512 правил маршрутизации")
+			}
+		}
+	}
+	if mode == "full" {
+		// Keep the saved list in the UI, but do not activate it in the default mode.
+		normalized = nil
+	}
+	if mode != "full" && len(normalized) == 0 {
+		return routingOptions{}, errors.New("Для выбранного режима укажите хотя бы один домен")
+	}
+	return routingOptions{Mode: mode, DirectDomains: normalized}, nil
+}
+
+func makeConfigWithRoutingOptions(p Profile, dnsID string, customServers []string, fragmentation bool, outboundInterface string, routing routingOptions) ([]byte, error) {
 	_, dns, err := selectedDNS(dnsID, customServers)
 	if err != nil {
 		return nil, err
@@ -288,10 +415,14 @@ func makeConfigWithOptions(p Profile, dnsID string, customServers []string, frag
 	if err != nil {
 		return nil, err
 	}
-	return marshalRuntimeConfig([]any{outbound}, dns, outboundInterface, false)
+	return marshalRuntimeConfigWithRouting([]any{outbound}, dns, outboundInterface, routing)
 }
 
 func makeAutoConfigWithOptions(profiles []Profile, dnsID string, customServers []string, fragmentation bool, outboundInterface string) ([]byte, error) {
+	return makeAutoConfigWithRoutingOptions(profiles, dnsID, customServers, fragmentation, outboundInterface, routingOptions{})
+}
+
+func makeAutoConfigWithRoutingOptions(profiles []Profile, dnsID string, customServers []string, fragmentation bool, outboundInterface string, routing routingOptions) ([]byte, error) {
 	if len(profiles) == 0 {
 		return nil, errors.New("для Auto не переданы серверы")
 	}
@@ -307,7 +438,34 @@ func makeAutoConfigWithOptions(profiles []Profile, dnsID string, customServers [
 		}
 		outbounds = append(outbounds, outbound)
 	}
-	return marshalRuntimeConfig(outbounds, dns, outboundInterface, true)
+	config := runtimeConfigWithRouting(outbounds, dns, outboundInterface, routing)
+	fallbackTag := "auto-" + profiles[0].ID
+	config["observatory"] = map[string]any{
+		"subjectSelector":   []string{"auto-"},
+		"probeUrl":          "https://www.gstatic.com/generate_204",
+		"probeInterval":     autoProbeInterval,
+		"enableConcurrency": true,
+	}
+	rules := []any{}
+	if routing.Mode == "bypass" {
+		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "domain": routing.DirectDomains, "outboundTag": "direct"})
+	} else if routing.Mode == "proxy_only" {
+		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "domain": routing.DirectDomains, "balancerTag": "shadow-auto"})
+		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "outboundTag": "direct"})
+	}
+	if routing.Mode != "proxy_only" {
+		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "balancerTag": "shadow-auto"})
+	}
+	config["routing"] = map[string]any{
+		"rules": rules,
+		"balancers": []any{map[string]any{
+			"tag":         "shadow-auto",
+			"selector":    []string{"auto-"},
+			"fallbackTag": fallbackTag,
+			"strategy":    map[string]any{"type": "leastping"},
+		}},
+	}
+	return json.Marshal(config)
 }
 
 func configuredOutbound(p Profile, tag string, fragmentation bool) (map[string]any, error) {
@@ -316,7 +474,7 @@ func configuredOutbound(p Profile, tag string, fragmentation bool) (map[string]a
 		return nil, err
 	}
 	outbound["tag"] = tag
-	if fragmentation {
+	if fragmentation && p.Protocol != "hysteria" {
 		stream, _ := outbound["streamSettings"].(map[string]any)
 		if stream == nil {
 			stream = map[string]any{}
@@ -337,24 +495,43 @@ func configuredOutbound(p Profile, tag string, fragmentation bool) (map[string]a
 	return outbound, nil
 }
 
-func marshalRuntimeConfig(outbounds []any, dns dnsPreset, outboundInterface string, observeAuto bool) ([]byte, error) {
+func runtimeConfig(outbounds []any, dns dnsPreset, outboundInterface string) map[string]any {
+	return runtimeConfigWithRouting(outbounds, dns, outboundInterface, routingOptions{})
+}
+
+func runtimeConfigWithRouting(outbounds []any, dns dnsPreset, outboundInterface string, routing routingOptions) map[string]any {
 	if outboundInterface == "" {
 		outboundInterface = "auto"
 	}
+	// Keep a direct outbound available for domain split-routing. It is harmless
+	// when the default full-VPN mode is selected because no rule points to it.
+	runtimeOutbounds := make([]any, 0, len(outbounds)+1)
+	runtimeOutbounds = append(runtimeOutbounds, outbounds...)
+	runtimeOutbounds = append(runtimeOutbounds, map[string]any{"tag": "direct", "protocol": "freedom", "settings": map[string]any{}})
 	config := map[string]any{
 		"log":       map[string]any{"loglevel": "debug"},
-		"inbounds":  []any{map[string]any{"tag": "tun-in", "protocol": "tun", "settings": map[string]any{"name": "ShadowVPN", "desc": "ShadowVPN", "mtu": 1500, "gateway": []string{"172.31.255.1/30", "fd31:ffff::1/126"}, "dns": dns.Servers, "autoSystemRoutingTable": []string{"0.0.0.0/0", "::/0"}, "autoOutboundsInterface": outboundInterface}}},
-		"outbounds": outbounds,
+		"inbounds":  []any{map[string]any{"tag": "tun-in", "protocol": "tun", "sniffing": map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}}, "settings": map[string]any{"name": "ShadowVPN", "desc": "ShadowVPN", "mtu": 1500, "gateway": []string{"172.31.255.1/30", "fd31:ffff::1/126"}, "dns": dns.Servers, "autoSystemRoutingTable": []string{"0.0.0.0/0", "::/0"}, "autoOutboundsInterface": outboundInterface}}},
+		"outbounds": runtimeOutbounds,
 	}
-	if observeAuto {
-		config["observatory"] = map[string]any{
-			"subjectSelector":   []string{"auto-"},
-			"probeUrl":          "https://www.gstatic.com/generate_204",
-			"probeInterval":     autoProbeInterval,
-			"enableConcurrency": true,
+	if routing.Mode != "full" && len(routing.DirectDomains) > 0 {
+		rules := []any{}
+		if routing.Mode == "proxy_only" {
+			rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "domain": routing.DirectDomains, "outboundTag": "proxy"})
+			rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "outboundTag": "direct"})
+		} else {
+			rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "domain": routing.DirectDomains, "outboundTag": "direct"})
 		}
+		config["routing"] = map[string]any{"domainStrategy": "IPIfNonMatch", "rules": rules}
 	}
-	return json.Marshal(config)
+	return config
+}
+
+func marshalRuntimeConfig(outbounds []any, dns dnsPreset, outboundInterface string) ([]byte, error) {
+	return marshalRuntimeConfigWithRouting(outbounds, dns, outboundInterface, routingOptions{})
+}
+
+func marshalRuntimeConfigWithRouting(outbounds []any, dns dnsPreset, outboundInterface string, routing routingOptions) ([]byte, error) {
+	return json.Marshal(runtimeConfigWithRouting(outbounds, dns, outboundInterface, routing))
 }
 
 func cloneObject(value map[string]any) (map[string]any, error) {

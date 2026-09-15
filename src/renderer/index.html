@@ -51,6 +51,12 @@
               </span>
               <span class="menu-item-copy"><strong>Настройки</strong><small>DNS и параметры подключения</small></span>
             </button>
+            <button class="menu-item" id="groupsMenuItem" type="button" role="menuitem">
+              <span class="menu-item-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M5 5h6v6H5V5Zm8 0h6v6h-6V5ZM5 13h6v6H5v-6Zm8 0h6v6h-6v-6Z"/></svg>
+              </span>
+              <span class="menu-item-copy"><strong>Группы серверов</strong><small>Настроить серверы для Auto</small></span>
+            </button>
             <div class="menu-separator" role="separator"></div>
             <button class="menu-item compact" id="changeSubscriptionBtn" type="button" role="menuitem">
               <span class="menu-item-icon" aria-hidden="true">
@@ -66,7 +72,7 @@
 
     <section class="servers">
       <div class="servers-title-row">
-        <h2 class="servers-heading">Все серверы</h2>
+        <h2 class="servers-heading" id="serversHeading">Все серверы</h2>
         <div class="server-list-actions">
           <div class="sort-anchor">
             <button class="ping-btn" id="sortBtn" type="button" aria-label="Сортировка серверов" title="Сортировка серверов" aria-expanded="false" aria-controls="sortMenu">
@@ -81,17 +87,31 @@
             </div>
           </div>
           <button class="ping-btn" id="pingBtn" type="button" aria-label="Измерить TCP-пинг серверов" title="Измерить TCP-пинг">
-            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-              <path d="M20 11a8 8 0 1 0-2.35 5.65M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            <svg class="ping-gauge" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+              <path d="M4 18a8.5 8.5 0 1 1 16 0" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round"/>
+              <path d="m6.5 14.2-1.35-.55M8.7 11.4l-.9-1.15M12 10V8.5M15.3 11.4l.9-1.15M17.5 14.2l1.35-.55" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
+              <path class="ping-gauge-needle" d="M12 17V11" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+              <circle cx="12" cy="17" r="1.35" fill="currentColor"/>
             </svg>
           </button>
         </div>
+      </div>
+      <div class="server-categories" id="serverCategoryTabs" role="tablist" aria-label="Категории серверов">
+        <button class="server-category active" type="button" role="tab" data-server-category="all" aria-controls="serverList" aria-selected="true">Все</button>
+        <button class="server-category" type="button" role="tab" data-server-category="fast" aria-controls="serverList" aria-selected="false">Быстрые</button>
+        <button class="server-category" type="button" role="tab" data-server-category="p2p" aria-controls="serverList" aria-selected="false">P2P</button>
+        <button class="server-category" type="button" role="tab" data-server-category="gemini" aria-controls="serverList" aria-selected="false">Gemini</button>
+        <button class="server-category" type="button" role="tab" data-server-category="warp" aria-controls="serverList" aria-selected="false">WARP</button>
+        <button class="server-category" type="button" role="tab" data-server-category="no-tls" aria-controls="serverList" aria-selected="false">No TLS</button>
       </div>
       <p class="demo-note">TUN · Windows</p>
       <div class="server-list" id="serverList"></div>
     </section>
 
     <main class="connect-stage">
+      <div class="connection-map" aria-hidden="true">
+        <img src="assets/world-map.svg" alt="" />
+      </div>
       <button class="power-orb" id="powerBtn" aria-pressed="false">
         <span class="power-orb-glow"></span>
         <svg viewBox="0 0 24 24" width="64" height="64" class="power-icon">
@@ -132,7 +152,40 @@
         </button>
       </header>
       <div class="settings-body">
-        <p class="settings-section-title">Сеть</p>
+        <p class="settings-section-title">Устройство</p>
+        <div class="setting-card device-card">
+          <span class="setting-copy">
+            <strong>HWID устройства</strong>
+            <small>Передаётся серверу подписки для привязки устройства</small>
+          </span>
+          <span class="device-value-wrap">
+            <code id="deviceHwid">Загрузка…</code>
+            <button id="copyHwidBtn" type="button">Копировать</button>
+          </span>
+        </div>
+        <p class="settings-section-title setting-spaced">Подписка</p>
+        <label class="setting-card" for="autoUpdateSelect">
+          <span class="setting-copy">
+            <strong>Обновление подписки</strong>
+            <small id="autoUpdateDescription">Список серверов обновляется автоматически</small>
+          </span>
+          <span class="select-shell">
+            <select id="autoUpdateSelect" aria-label="Интервал обновления подписки"></select>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
+          </span>
+        </label>
+        <p class="settings-section-title setting-spaced">Приложение</p>
+        <label class="setting-card setting-toggle" for="autoStartToggle">
+          <span class="setting-copy"><strong>Запуск при старте Windows</strong><small id="autoStartDescription">Запускать ShadowVPN после входа в систему</small></span>
+          <input class="sr-only" id="autoStartToggle" type="checkbox" />
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+        </label>
+        <label class="setting-card setting-toggle" for="pingOnOpenToggle">
+          <span class="setting-copy"><strong>Пинговать при открытии приложения</strong><small>Проверять серверы после загрузки подписки</small></span>
+          <input class="sr-only" id="pingOnOpenToggle" type="checkbox" />
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+        </label>
+        <p class="settings-section-title setting-spaced">Сеть</p>
         <label class="setting-card" for="dnsSelect">
           <span class="setting-copy">
             <strong>DNS внутри VPN</strong>
@@ -148,6 +201,32 @@
           <input id="customDnsInput" type="text" maxlength="200" autocomplete="off" spellcheck="false" placeholder="Например: 1.1.1.1, 2606:4700:4700::1111" aria-describedby="customDnsError" />
           <p id="customDnsError" class="setting-error" role="alert"></p>
         </div>
+        <p class="settings-section-title setting-spaced">Маршрутизация</p>
+        <label class="setting-card" for="routingModeSelect">
+          <span class="setting-copy">
+            <strong>Режим маршрутизации</strong>
+            <small id="routingModeDescription">Весь трафик проходит через VPN</small>
+          </span>
+          <span class="select-shell">
+            <select id="routingModeSelect" aria-label="Режим маршрутизации"></select>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
+          </span>
+        </label>
+        <div class="routing-domains" id="routingDomainsFields" hidden>
+          <label for="routingDomainsInput">Домены для правила</label>
+          <textarea id="routingDomainsInput" maxlength="12000" rows="4" autocomplete="off" spellcheck="false" placeholder="example.com&#10;full:private.example.com&#10;keyword:messenger"></textarea>
+          <small>По одному правилу на строку. Поддерживаются домен, full:, keyword: и regexp:.</small>
+        </div>
+        <label class="setting-card" for="pingMethodSelect">
+          <span class="setting-copy">
+            <strong>Проверка задержки</strong>
+            <small id="pingMethodDescription">Быстрая проверка доступности порта</small>
+          </span>
+          <span class="select-shell">
+            <select id="pingMethodSelect" aria-label="Метод проверки задержки"></select>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
+          </span>
+        </label>
         <label class="setting-card setting-toggle" for="fragmentationToggle">
           <span class="setting-copy">
             <strong>Фрагментация TLS</strong>
@@ -192,9 +271,42 @@
     </section>
   </div>
 
+  <div class="groups-overlay" id="groupsOverlay" hidden>
+    <section class="groups-panel" role="dialog" aria-modal="true" aria-labelledby="groupsTitle">
+      <header class="settings-header">
+        <div>
+          <h2 id="groupsTitle">Группы серверов</h2>
+          <p>Ограничьте набор хостов, между которыми переключается Auto</p>
+        </div>
+        <button class="logs-close" id="closeGroupsBtn" type="button" aria-label="Закрыть группы">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+        </button>
+      </header>
+      <div class="groups-layout">
+        <aside class="groups-sidebar">
+          <div class="groups-sidebar-title"><span>Мои группы</span><button id="createGroupBtn" type="button" aria-label="Создать группу" title="Создать группу">+</button></div>
+          <div class="groups-list" id="groupsList"></div>
+        </aside>
+        <div class="group-editor" id="groupEditor">
+          <div class="group-empty" id="groupEmpty">Создайте группу и выберите серверы для Auto</div>
+          <div id="groupFields" hidden>
+            <label class="group-name-label" for="groupNameInput">Название</label>
+            <input class="group-name-input" id="groupNameInput" type="text" maxlength="40" autocomplete="off" />
+            <button class="group-auto-button" id="activateGroupBtn" type="button"><span class="group-radio" aria-hidden="true"></span><span><strong>Использовать в Auto</strong><small id="groupAutoDescription">Только выбранные серверы</small></span></button>
+            <div class="group-hosts-heading"><span>Серверы</span><span class="group-host-tools"><small id="groupHostCount">0 выбрано</small><button id="groupSelectAllBtn" type="button">Все</button><button id="groupClearBtn" type="button">Сбросить</button></span></div>
+            <div class="group-hosts" id="groupHosts"></div>
+            <div class="group-editor-actions"><button class="group-delete" id="deleteGroupBtn" type="button">Удалить группу</button></div>
+          </div>
+        </div>
+      </div>
+      <p class="groups-note">Группы хранятся только на этом компьютере. Изменения применяются при следующем подключении.</p>
+    </section>
+  </div>
+
   <script src="tauri-bridge.js"></script>
   <script src="server-display.js"></script>
   <script src="settings-store.js"></script>
+  <script src="group-store.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

@@ -7,7 +7,10 @@ import (
 	"strings"
 )
 
-const autoProfileID = "000000000000000000000000"
+const (
+	autoProfileID     = "000000000000000000000000"
+	autoNoRUProfileID = "000000000000000000000001"
+)
 
 const autoProbeInterval = "30s"
 
@@ -26,9 +29,48 @@ func autoProfile() Profile {
 	}
 }
 
+func autoNoRUProfile() Profile {
+	return Profile{
+		ID:        autoNoRUProfileID,
+		Name:      "Авто без РФ",
+		Protocol:  "auto",
+		Transport: "tcp",
+		Auto:      true,
+	}
+}
+
+func isAutoProfileID(id string) bool {
+	return id == autoProfileID || id == autoNoRUProfileID
+}
+
+func isRussianProfile(profile Profile) bool {
+	name := strings.ToLower(strings.TrimSpace(profile.Name))
+	if strings.Contains(name, "🇷🇺") {
+		return true
+	}
+	for _, field := range strings.Fields(name) {
+		field = strings.Trim(field, "[](){}|/\\:;,.—–-_🏴🏳️")
+		switch field {
+		case "ru", "rus", "russia", "россия", "рф":
+			return true
+		}
+	}
+	return false
+}
+
+func withoutRussianProfiles(profiles []Profile) []Profile {
+	result := make([]Profile, 0, len(profiles))
+	for _, profile := range profiles {
+		if !isRussianProfile(profile) {
+			result = append(result, profile)
+		}
+	}
+	return result
+}
+
 func profilesForRenderer(profiles []Profile) []Profile {
-	result := make([]Profile, 0, len(profiles)+1)
-	result = append(result, autoProfile())
+	result := make([]Profile, 0, len(profiles)+2)
+	result = append(result, autoProfile(), autoNoRUProfile())
 	return append(result, profiles...)
 }
 
@@ -53,13 +95,22 @@ func fastestProfile(profiles []Profile, results []PingResult) (int, PingResult, 
 }
 
 func pingProfilesWithAuto(parent context.Context, profiles []Profile) []PingResult {
-	results := pingProfiles(parent, profiles)
+	return pingProfilesWithAutoMethod(parent, profiles, "tcp")
+}
+
+func pingProfilesWithAutoMethod(parent context.Context, profiles []Profile, method string) []PingResult {
+	results := pingProfilesWithMethod(parent, profiles, method)
 	auto := PingResult{ID: autoProfileID}
 	if _, best, ok := fastestProfile(profiles, results); ok {
 		auto.Available = true
 		auto.LatencyMS = best.LatencyMS
 	}
-	return append([]PingResult{auto}, results...)
+	autoNoRU := PingResult{ID: autoNoRUProfileID}
+	if _, best, ok := fastestProfile(withoutRussianProfiles(profiles), results); ok {
+		autoNoRU.Available = true
+		autoNoRU.LatencyMS = best.LatencyMS
+	}
+	return append([]PingResult{auto, autoNoRU}, results...)
 }
 
 // prepareAutoProfiles puts the fastest reachable profile first, then resolves
@@ -68,7 +119,7 @@ func pingProfilesWithAuto(parent context.Context, profiles []Profile) []PingResu
 func prepareAutoProfiles(ctx context.Context, profiles []Profile, results []PingResult) ([]Profile, []proxyEndpoint, []string, error) {
 	selectedIndex, _, ok := fastestProfile(profiles, results)
 	if !ok {
-		return nil, nil, nil, errors.New("Авто не нашёл доступных серверов. Запустите проверку TCP-пинга")
+		return nil, nil, nil, errors.New("Авто не нашёл доступных серверов. Запустите проверку задержки")
 	}
 
 	byID := make(map[string]PingResult, len(results))

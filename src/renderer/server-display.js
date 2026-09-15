@@ -42,5 +42,21 @@
     }).map(item => item.profile);
   }
 
-  window.shadowVpnDisplay = { regionalFlagCode, serverFlagAndName, sortServerProfiles };
+  function serverCategoriesForProfile(profile) {
+    if (profile?.auto) return ["all"];
+    const name = serverFlagAndName(profile?.name).name.normalize("NFKC").toLocaleLowerCase("en-US");
+    const categories = ["all"];
+    if (name.includes("hysteria") || /(^|[^a-z0-9])ws([^a-z0-9]|$)/i.test(name)) categories.push("fast");
+    if (name.includes("torrent")) categories.push("p2p");
+    if (name.includes("gemini")) categories.push("gemini");
+    if (name.includes("warp")) categories.push("warp");
+    if (/\bno[\s_-]+tls\b/i.test(name)) categories.push("no-tls");
+    return categories;
+  }
+
+  function filterServerProfiles(profiles, category = "all") {
+    return profiles.filter(profile => serverCategoriesForProfile(profile).includes(category));
+  }
+
+  window.shadowVpnDisplay = { regionalFlagCode, serverFlagAndName, sortServerProfiles, serverCategoriesForProfile, filterServerProfiles };
 })();

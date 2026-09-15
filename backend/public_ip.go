@@ -53,7 +53,7 @@ func publicIPv4(parent context.Context) (string, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err == nil {
 			req.Header.Set("Accept", "text/plain")
-			req.Header.Set("User-Agent", "ShadowVPN/0.10.0")
+			req.Header.Set("User-Agent", appUserAgent)
 			var response *http.Response
 			response, err = client.Do(req)
 			if err == nil {

@@ -104,6 +104,13 @@ func profileWithEndpoint(profile Profile, address, originalHost string) (Profile
 func replaceOutboundEndpoint(outbound map[string]any, address string) bool {
 	settings, _ := outbound["settings"].(map[string]any)
 	protocol, _ := outbound["protocol"].(string)
+	if protocol == "hysteria" {
+		if settings == nil {
+			return false
+		}
+		settings["address"] = address
+		return true
+	}
 	key := "servers"
 	if protocol == "vless" || protocol == "vmess" {
 		key = "vnext"
