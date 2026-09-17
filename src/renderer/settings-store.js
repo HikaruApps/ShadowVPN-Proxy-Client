@@ -9,6 +9,8 @@
   const pingOnOpenStorageKey = "shadowvpn.pingOnOpen";
   const routingModeStorageKey = "shadowvpn.routingMode";
   const routingDomainsStorageKey = "shadowvpn.routingDomains";
+  const geoIPURLStorageKey = "shadowvpn.geoIpUrl";
+  const geoSiteURLStorageKey = "shadowvpn.geoSiteUrl";
   const pingMethods = Object.freeze([
     Object.freeze({ id: "tcp", name: "TCP", detail: "быстрая проверка порта" }),
     Object.freeze({ id: "head", name: "HTTP HEAD", detail: "реальный запрос через сервер" }),
@@ -190,6 +192,67 @@
     return normalized;
   }
 
+  function readGeoDataURL(key, storage = window.localStorage) {
+    try { return String(storage.getItem(key) || "").slice(0, 2048); }
+    catch { return ""; }
+  }
+
+  function writeGeoDataURL(key, value, storage = window.localStorage) {
+    const normalized = String(value || "").slice(0, 2048);
+    try { storage.setItem(key, normalized); } catch { /* Keep the session value. */ }
+    return normalized;
+  }
+
+  function readGeoIPURL(storage = window.localStorage) {
+    return readGeoDataURL(geoIPURLStorageKey, storage);
+  }
+
+  function writeGeoIPURL(value, storage = window.localStorage) {
+    return writeGeoDataURL(geoIPURLStorageKey, value, storage);
+  }
+
+  function readGeoSiteURL(storage = window.localStorage) {
+    return readGeoDataURL(geoSiteURLStorageKey, storage);
+  }
+
+  function writeGeoSiteURL(value, storage = window.localStorage) {
+    return writeGeoDataURL(geoSiteURLStorageKey, value, storage);
+  }
+
+  function validateGeoDataURL(value, title) {
+    const normalized = String(value || "").trim();
+    if (!normalized) return { value: "", error: "" };
+    if (normalized.length > 2048 || /\s/.test(normalized)) {
+      return { value: "", error: `${title}: ссылка слишком длинная или содержит пробелы` };
+    }
+    try {
+      const parsed = new URL(normalized);
+      if (parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password || parsed.hash) {
+        return { value: "", error: `${title}: нужна обычная HTTPS-ссылка без логина и фрагмента` };
+      }
+    } catch {
+      return { value: "", error: `${title}: некорректная HTTPS-ссылка` };
+    }
+    return { value: normalized, error: "" };
+  }
+
+  function validateGeoDataSources(rules, geoIPURL, geoSiteURL) {
+    const geoIP = validateGeoDataURL(geoIPURL, "GeoIP");
+    if (geoIP.error) return { geoIPURL: "", geoSiteURL: "", error: geoIP.error, field: "geoip" };
+    const geoSite = validateGeoDataURL(geoSiteURL, "GeoSite");
+    if (geoSite.error) return { geoIPURL: "", geoSiteURL: "", error: geoSite.error, field: "geosite" };
+    const values = Array.isArray(rules) ? rules : [];
+    const needsGeoIP = values.some(rule => String(rule).trim().toLowerCase().startsWith("geoip:"));
+    const needsGeoSite = values.some(rule => String(rule).trim().toLowerCase().startsWith("geosite:"));
+    if (needsGeoIP && !geoIP.value) {
+      return { geoIPURL: "", geoSiteURL: geoSite.value, error: "Для правил geoip: укажите ссылку на geoip.dat", field: "geoip" };
+    }
+    if (needsGeoSite && !geoSite.value) {
+      return { geoIPURL: geoIP.value, geoSiteURL: "", error: "Для правил geosite: укажите ссылку на geosite.dat", field: "geosite" };
+    }
+    return { geoIPURL: geoIP.value, geoSiteURL: geoSite.value, error: "", field: "" };
+  }
+
   function validIPv4(value) {
     const parts = value.split(".");
     if (parts.length !== 4 || !parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)) return false;
@@ -246,6 +309,12 @@
     writeRoutingMode,
     readRoutingDomains,
     writeRoutingDomains,
+    readGeoIPURL,
+    writeGeoIPURL,
+    readGeoSiteURL,
+    writeGeoSiteURL,
+    validateGeoDataURL,
+    validateGeoDataSources,
     parseCustomDNS,
   });
 })();

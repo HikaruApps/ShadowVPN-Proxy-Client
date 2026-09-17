@@ -27,6 +27,10 @@ const routingModeSelect = document.getElementById("routingModeSelect");
 const routingModeDescription = document.getElementById("routingModeDescription");
 const routingDomainsFields = document.getElementById("routingDomainsFields");
 const routingDomainsInput = document.getElementById("routingDomainsInput");
+const routingGeoDataFields = document.getElementById("routingGeoDataFields");
+const geoIPURLInput = document.getElementById("geoIPURLInput");
+const geoSiteURLInput = document.getElementById("geoSiteURLInput");
+const geoDataError = document.getElementById("geoDataError");
 const autoUpdateSelect = document.getElementById("autoUpdateSelect");
 const autoUpdateDescription = document.getElementById("autoUpdateDescription");
 const pingMethodSelect = document.getElementById("pingMethodSelect");
@@ -55,6 +59,11 @@ const ipValue = document.getElementById("ipValue");
 const connectionDivider = document.getElementById("connectionDivider");
 const connectionDuration = document.getElementById("connectionDuration");
 const connectionTime = document.getElementById("connectionTime");
+const trafficStats = document.getElementById("trafficStats");
+const downloadSpeed = document.getElementById("downloadSpeed");
+const downloadTotal = document.getElementById("downloadTotal");
+const uploadSpeed = document.getElementById("uploadSpeed");
+const uploadTotal = document.getElementById("uploadTotal");
 const groupsOverlay = document.getElementById("groupsOverlay");
 const closeGroupsBtn = document.getElementById("closeGroupsBtn");
 const createGroupBtn = document.getElementById("createGroupBtn");
@@ -87,7 +96,8 @@ let pendingLogLines = [];
 let logLineCount = 0;
 let sortMenuOpen = false;
 const { serverFlagAndName, sortServerProfiles, filterServerProfiles } = window.shadowVpnDisplay;
-const { dnsProviders, readDNS, writeDNS, readCustomDNS, writeCustomDNS, readFragmentation, writeFragmentation, readKillSwitch, writeKillSwitch, autoUpdateIntervals, readAutoUpdate, writeAutoUpdate, readLastSubscriptionSync, writeLastSubscriptionSync, pingMethods, readPingMethod, writePingMethod, readPingOnOpen, writePingOnOpen, routingModes, readRoutingMode, writeRoutingMode, readRoutingDomains, writeRoutingDomains, parseCustomDNS } = window.shadowVpnSettings;
+const { normalizeTraffic, formatBytes, formatSpeed } = window.shadowVpnTraffic;
+const { dnsProviders, readDNS, writeDNS, readCustomDNS, writeCustomDNS, readFragmentation, writeFragmentation, readKillSwitch, writeKillSwitch, autoUpdateIntervals, readAutoUpdate, writeAutoUpdate, readLastSubscriptionSync, writeLastSubscriptionSync, pingMethods, readPingMethod, writePingMethod, readPingOnOpen, writePingOnOpen, routingModes, readRoutingMode, writeRoutingMode, readRoutingDomains, writeRoutingDomains, readGeoIPURL, writeGeoIPURL, readGeoSiteURL, writeGeoSiteURL, validateGeoDataSources, parseCustomDNS } = window.shadowVpnSettings;
 const groupStore = window.shadowVpnGroups;
 let groupState = groupStore.readState();
 let editingGroupId = groupState.groups[0]?.id || "";
@@ -100,6 +110,8 @@ let selectedPingMethod = readPingMethod();
 let pingOnOpenEnabled = readPingOnOpen();
 let selectedRoutingMode = readRoutingMode();
 let routingDomainsValue = readRoutingDomains();
+let geoIPURLValue = readGeoIPURL();
+let geoSiteURLValue = readGeoSiteURL();
 let autoUpdateTimer = null;
 let pendingSubscriptionRefresh = false;
 let currentHWID = "";
@@ -351,6 +363,24 @@ function stopConnectionTimer() {
   connectionDuration.hidden = true;
 }
 
+function resetTrafficDisplay(show = false) {
+  downloadSpeed.textContent = "0 Б/с";
+  downloadTotal.textContent = "0 Б";
+  uploadSpeed.textContent = "0 Б/с";
+  uploadTotal.textContent = "0 Б";
+  trafficStats.hidden = !show;
+}
+
+function applyTraffic(sample) {
+  if (currentState !== "connected") return;
+  const traffic = normalizeTraffic(sample);
+  downloadSpeed.textContent = formatSpeed(traffic.downloadBps);
+  downloadTotal.textContent = formatBytes(traffic.downloadBytes);
+  uploadSpeed.textContent = formatSpeed(traffic.uploadBps);
+  uploadTotal.textContent = formatBytes(traffic.uploadBytes);
+  trafficStats.hidden = false;
+}
+
 async function requestPublicIp(masked = false) {
   const reply = await window.vpnApi.publicIp(masked);
   const value = reply.result?.ip;
@@ -397,16 +427,21 @@ function applyState(state) {
 
   if (state === "connecting") {
     stopConnectionTimer();
+    resetTrafficDisplay();
     startIpEncryption();
   } else if (state === "connected") {
     stopIpEncryption();
     setIpText("Защищённый IP", "***.***.***.***", "protected");
-    if (previousState !== "connected") startConnectionTimer();
+    if (previousState !== "connected") {
+      startConnectionTimer();
+      resetTrafficDisplay(true);
+    }
   } else if (state === "disconnecting") {
     startIpEncryption("Восстановление IP");
   } else if (state === "disconnected") {
     stopIpEncryption();
     stopConnectionTimer();
+    resetTrafficDisplay();
     setIpText("Ваш IP", directIp || "Определяем…");
     if (!directIp && !directIpPromise) {
       window.setTimeout(() => {
@@ -541,7 +576,26 @@ function updateRoutingControl() {
   const mode = routingModes.find(item => item.id === selectedRoutingMode) || routingModes[0];
   routingModeDescription.textContent = mode.detail;
   routingDomainsFields.hidden = selectedRoutingMode === "full";
+  routingGeoDataFields.hidden = selectedRoutingMode === "full";
   routingDomainsInput.value = routingDomainsValue;
+  geoIPURLInput.value = geoIPURLValue;
+  geoSiteURLInput.value = geoSiteURLValue;
+  updateGeoDataValidation();
+}
+
+function updateGeoDataValidation() {
+  if (selectedRoutingMode === "full") {
+    geoDataError.textContent = "";
+    geoIPURLInput.removeAttribute("aria-invalid");
+    geoSiteURLInput.removeAttribute("aria-invalid");
+    return { geoIPURL: "", geoSiteURL: "", error: "", field: "" };
+  }
+  const rules = routingDomainsValue.split(/\s+/).map(item => item.trim()).filter(Boolean);
+  const validation = validateGeoDataSources(rules, geoIPURLValue, geoSiteURLValue);
+  geoDataError.textContent = validation.error;
+  geoIPURLInput.toggleAttribute("aria-invalid", validation.field === "geoip");
+  geoSiteURLInput.toggleAttribute("aria-invalid", validation.field === "geosite");
+  return validation;
 }
 
 async function loadDeviceInfo() {
@@ -774,10 +828,19 @@ powerBtn.addEventListener("click", async () => {
     }
     customDNSServers = validation.servers;
   }
+  const directDomains = routingDomainsValue.split(/\s+/).map(item => item.trim()).filter(Boolean);
+  const geoData = disconnecting
+    ? { geoIPURL: "", geoSiteURL: "", error: "", field: "" }
+    : updateGeoDataValidation();
+  if (!disconnecting && geoData.error) {
+    statusText.textContent = geoData.error;
+    openSettings();
+    (geoData.field === "geosite" ? geoSiteURLInput : geoIPURLInput).focus({ preventScroll: true });
+    return;
+  }
   requestBusy = true; powerBtn.disabled = true;
   updatePingButton();
   try {
-    const directDomains = routingDomainsValue.split(/\s+/).map(item => item.trim()).filter(Boolean);
     if (!disconnecting && !directIp) {
       await Promise.race([
         loadDirectIp(),
@@ -786,7 +849,7 @@ powerBtn.addEventListener("click", async () => {
     }
     const reply = disconnecting
       ? await window.vpnApi.disconnect()
-      : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains);
+      : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL);
     if (!reply.ok) {
       statusText.textContent = reply.error;
     } else if (!disconnecting) {
@@ -839,6 +902,7 @@ pingBtn.addEventListener("click", runPingTest);
 
 window.vpnApi.onStateChange(applyPushedState);
 window.vpnApi.onProfileChange(applyAutoProfileChange);
+window.vpnApi.onTraffic(applyTraffic);
 window.vpnApi.onLog(line => {
   const value = String(line);
   if (value.includes("Go core process exited")) {
@@ -1138,6 +1202,15 @@ routingModeSelect.addEventListener("change", () => {
 });
 routingDomainsInput.addEventListener("input", () => {
   routingDomainsValue = writeRoutingDomains(routingDomainsInput.value);
+  updateGeoDataValidation();
+});
+geoIPURLInput.addEventListener("input", () => {
+  geoIPURLValue = writeGeoIPURL(geoIPURLInput.value);
+  updateGeoDataValidation();
+});
+geoSiteURLInput.addEventListener("input", () => {
+  geoSiteURLValue = writeGeoSiteURL(geoSiteURLInput.value);
+  updateGeoDataValidation();
 });
 autoStartToggle.addEventListener("change", async () => {
   const requested = autoStartToggle.checked;
@@ -1260,6 +1333,8 @@ for (const mode of routingModes) {
 customDnsInput.value = customDNSValue;
 selectedRoutingMode = readRoutingMode();
 routingDomainsValue = readRoutingDomains();
+geoIPURLValue = readGeoIPURL();
+geoSiteURLValue = readGeoSiteURL();
 fragmentationToggle.checked = fragmentationEnabled;
 killSwitchToggle.checked = killSwitchEnabled;
 pingOnOpenToggle.checked = pingOnOpenEnabled;

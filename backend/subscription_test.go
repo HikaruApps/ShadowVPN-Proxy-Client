@@ -6,11 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	xgeodata "github.com/xtls/xray-core/common/geodata"
 	"github.com/xtls/xray-core/core"
+	"google.golang.org/protobuf/proto"
 )
 
 const sample = "vless://00000000-0000-4000-8000-000000000001@example.com:443?security=tls&sni=example.com&type=xhttp&path=%2Fapi&mode=stream-up#Poland"
@@ -54,6 +57,9 @@ func TestJSONIgnoresUntrustedSystemConfiguration(t *testing.T) {
 	}
 	if !strings.Contains(string(config), "autoOutboundsInterface") {
 		t.Fatal("loop avoidance missing")
+	}
+	if !strings.Contains(string(config), `"statsInboundUplink":true`) || !strings.Contains(string(config), `"statsInboundDownlink":true`) {
+		t.Fatal("TUN traffic counters missing")
 	}
 }
 func TestBadSubscriptions(t *testing.T) {
@@ -110,7 +116,7 @@ func TestDomainRoutingModesProduceSafeRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	routing, err := newRoutingOptions("bypass", []string{" example.com ", "full:private.example.com", "keyword:chat"})
+	routing, err := newRoutingOptions("bypass", []string{" example.com ", "full:private.example.com", "keyword:chat"}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,11 +140,98 @@ func TestDomainRoutingModesProduceSafeRules(t *testing.T) {
 	if firstRule["outboundTag"] != "direct" {
 		t.Fatalf("bypass rule does not use direct outbound: %#v", firstRule)
 	}
-	if _, err := newRoutingOptions("proxy_only", nil); err == nil {
+	if _, err := newRoutingOptions("proxy_only", nil, "", ""); err == nil {
 		t.Fatal("proxy_only without domains was accepted")
 	}
-	if full, err := newRoutingOptions("full", []string{"example.com"}); err != nil || len(full.DirectDomains) != 0 {
+	if full, err := newRoutingOptions("full", []string{"example.com"}, "bad-url", "bad-url"); err != nil || len(full.DirectDomains) != 0 {
 		t.Fatalf("full mode should ignore saved domain rules: %#v err=%v", full, err)
+	}
+}
+
+func TestGeoDataRoutingSeparatesDomainAndIPRules(t *testing.T) {
+	routing, err := newRoutingOptions(
+		"bypass",
+		[]string{"geosite:youtube", "geoip:ru", "geosite:youtube"},
+		"https://example.com/geoip.dat",
+		"https://example.com/geosite.dat",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routing.DirectDomains) != 1 || len(routing.IPRules) != 1 || !routing.NeedsGeoIP || !routing.NeedsGeoSite {
+		t.Fatalf("GeoData rules were not classified: %#v", routing)
+	}
+	routing.AssetDir = t.TempDir()
+	geoIP, err := proto.Marshal(&xgeodata.GeoIPList{Entry: []*xgeodata.GeoIP{{
+		Code: "RU",
+		Cidr: []*xgeodata.CIDR{{Ip: []byte{127, 0, 0, 0}, Prefix: 8}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	geoSite, err := proto.Marshal(&xgeodata.GeoSiteList{Entry: []*xgeodata.GeoSite{{
+		Code:   "YOUTUBE",
+		Domain: []*xgeodata.Domain{{Type: xgeodata.Domain_Domain, Value: "youtube.com"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(routing.AssetDir+"/geoip.dat", geoIP, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(routing.AssetDir+"/geosite.dat", geoSite, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := runtimeConfigWithRouting([]any{map[string]any{"tag": "proxy", "protocol": "freedom", "settings": map[string]any{}}}, dnsPreset{Name: "Test", Servers: []string{"1.1.1.1"}}, "auto", routing)
+	routingConfig := config["routing"].(map[string]any)
+	rules := routingConfig["rules"].([]any)
+	if len(rules) != 2 {
+		t.Fatalf("GeoSite and GeoIP must be independent OR-rules: %#v", rules)
+	}
+	if _, ok := rules[0].(map[string]any)["domain"]; !ok {
+		t.Fatalf("first GeoData rule is not a domain rule: %#v", rules[0])
+	}
+	if _, ok := rules[1].(map[string]any)["ip"]; !ok {
+		t.Fatalf("second GeoData rule is not an IP rule: %#v", rules[1])
+	}
+	if config["env"].(map[string]any)["XRAY_LOCATION_ASSET"] != routing.AssetDir {
+		t.Fatal("custom GeoData asset path is missing")
+	}
+	if len(config["geodata"].(map[string]any)["assets"].([]any)) != 2 {
+		t.Fatal("native Xray GeoData refresh is missing")
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.LoadConfig("json", bytes.NewReader(encoded)); err != nil {
+		t.Fatalf("Xray rejected GeoData routing config: %v", err)
+	}
+	if _, err := newRoutingOptions("bypass", []string{"geoip:ru"}, "", ""); err == nil {
+		t.Fatal("geoip rule without a source was accepted")
+	}
+	if _, err := newRoutingOptions("bypass", []string{"geosite:youtube"}, "", "http://example.com/geosite.dat"); err == nil {
+		t.Fatal("insecure GeoSite URL was accepted")
+	}
+}
+
+func TestGeoDataProtobufValidation(t *testing.T) {
+	geoIP, err := proto.Marshal(&xgeodata.GeoIPList{Entry: []*xgeodata.GeoIP{{
+		Code: "RU",
+		Cidr: []*xgeodata.CIDR{{Ip: []byte{127, 0, 0, 0}, Prefix: 8}},
+	}}})
+	if err != nil || validateGeoDataAsset(geoIP, "geoip.dat") != nil {
+		t.Fatalf("valid GeoIP was rejected: %v", err)
+	}
+	geoSite, err := proto.Marshal(&xgeodata.GeoSiteList{Entry: []*xgeodata.GeoSite{{
+		Code:   "YOUTUBE",
+		Domain: []*xgeodata.Domain{{Type: xgeodata.Domain_Domain, Value: "youtube.com"}},
+	}}})
+	if err != nil || validateGeoDataAsset(geoSite, "geosite.dat") != nil {
+		t.Fatalf("valid GeoSite was rejected: %v", err)
+	}
+	if validateGeoDataAsset([]byte("not protobuf"), "geoip.dat") == nil {
+		t.Fatal("invalid GeoIP protobuf was accepted")
 	}
 }
 
@@ -147,7 +240,7 @@ func TestAutoDomainRoutingKeepsBalancerFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	routing, err := newRoutingOptions("proxy_only", []string{"domain:example.com"})
+	routing, err := newRoutingOptions("proxy_only", []string{"domain:example.com"}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

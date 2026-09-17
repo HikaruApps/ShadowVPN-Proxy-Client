@@ -17,6 +17,7 @@ type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
 type LogBuffer = Arc<Mutex<VecDeque<String>>>;
 type LogCallback = Arc<dyn Fn(String) + Send + Sync>;
 type ProfileCallback = Arc<dyn Fn(Value) + Send + Sync>;
+type TrafficCallback = Arc<dyn Fn(Value) + Send + Sync>;
 const MAX_LOG_LINES: usize = 1500;
 
 pub struct Backend {
@@ -87,11 +88,26 @@ fn record_log(logs: &LogBuffer, callback: &LogCallback, line: impl Into<String>)
     callback(line);
 }
 
+fn normalized_traffic(value: &Value) -> Option<Value> {
+    let traffic = value.as_object()?;
+    let upload_bytes = traffic.get("uploadBytes")?.as_u64()?;
+    let download_bytes = traffic.get("downloadBytes")?.as_u64()?;
+    let upload_bps = traffic.get("uploadBps")?.as_u64()?;
+    let download_bps = traffic.get("downloadBps")?.as_u64()?;
+    Some(json!({
+        "uploadBytes": upload_bytes,
+        "downloadBytes": download_bytes,
+        "uploadBps": upload_bps,
+        "downloadBps": download_bps,
+    }))
+}
+
 impl Backend {
     pub fn spawn(
         executable: &Path,
         on_state: impl Fn(String) + Send + Sync + 'static,
         on_profile: impl Fn(Value) + Send + Sync + 'static,
+        on_traffic: impl Fn(Value) + Send + Sync + 'static,
         on_log: impl Fn(String) + Send + Sync + 'static,
     ) -> Result<Arc<Self>, String> {
         let mut command = Command::new(executable);
@@ -133,6 +149,7 @@ impl Backend {
         );
         let state_callback = Arc::new(on_state);
         let profile_callback: ProfileCallback = Arc::new(on_profile);
+        let traffic_callback: TrafficCallback = Arc::new(on_traffic);
         let stderr_logs = logs.clone();
         let stderr_callback = log_callback.clone();
         thread::spawn(move || {
@@ -167,6 +184,11 @@ impl Backend {
                 if msg["event"] == "profile" {
                     if let Some(profile) = msg.get("profile").filter(|value| value.is_object()) {
                         profile_callback(profile.clone());
+                    }
+                }
+                if msg["event"] == "traffic" {
+                    if let Some(traffic) = msg.get("traffic").and_then(normalized_traffic) {
+                        traffic_callback(traffic);
                     }
                 }
                 if let Some(id) = msg["id"].as_u64() {
@@ -225,7 +247,8 @@ impl Backend {
             self.pending.lock().unwrap().remove(&id);
             return Err(e);
         }
-        let timeout = if method == "connect" { 120 } else { 60 };
+        // The first connection may also bootstrap and validate custom GeoData.
+        let timeout = if method == "connect" { 180 } else { 60 };
         match rx.recv_timeout(Duration::from_secs(timeout)) {
             Ok(reply) => reply,
             Err(_) => {
@@ -288,19 +311,39 @@ mod tests {
     }
 
     #[test]
+    fn traffic_payload_is_strictly_normalized() {
+        let valid = normalized_traffic(&json!({
+            "uploadBytes": 1024,
+            "downloadBytes": 2048,
+            "uploadBps": 256,
+            "downloadBps": 512,
+            "ignored": "field",
+        }))
+        .unwrap();
+        assert_eq!(valid["downloadBps"], 512);
+        assert!(valid.get("ignored").is_none());
+        assert!(normalized_traffic(&json!({"uploadBytes": -1})).is_none());
+    }
+
+    #[test]
     fn ipc_state_errors_and_graceful_eof() {
         let folder = std::env::temp_dir().join(format!("shadowvpn-ipc-{}", std::process::id()));
         fs::create_dir_all(&folder).unwrap();
         let file = folder.join("fake-core");
-        fs::write(&file, "#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'event':'ready'}),flush=True)\nfor line in sys.stdin:\n r=json.loads(line)\n print(json.dumps({'event':'state','state':'connected'}),flush=True)\n print(json.dumps({'event':'profile','profile':{'profileId':'server','name':'Berlin'}}),flush=True)\n print(json.dumps({'id':r['id'],'ok':r['method']!='bad','result':{'value':42},'error':'expected'}),flush=True)\n").unwrap();
+        fs::write(&file, "#!/usr/bin/env python3\nimport json,sys\nprint(json.dumps({'event':'ready'}),flush=True)\nfor line in sys.stdin:\n r=json.loads(line)\n print(json.dumps({'event':'state','state':'connected'}),flush=True)\n print(json.dumps({'event':'profile','profile':{'profileId':'server','name':'Berlin'}}),flush=True)\n print(json.dumps({'event':'traffic','traffic':{'uploadBytes':1024,'downloadBytes':2048,'uploadBps':256,'downloadBps':512}}),flush=True)\n print(json.dumps({'id':r['id'],'ok':r['method']!='bad','result':{'value':42},'error':'expected'}),flush=True)\n").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o700)).unwrap();
         let selected = Arc::new(Mutex::new(Value::Null));
         let selected_callback = selected.clone();
+        let traffic = Arc::new(Mutex::new(Value::Null));
+        let traffic_callback = traffic.clone();
         let backend = Backend::spawn(
             &file,
             |_| {},
             move |profile| {
                 *selected_callback.lock().unwrap() = profile;
+            },
+            move |sample| {
+                *traffic_callback.lock().unwrap() = sample;
             },
             |_| {},
         )
@@ -308,6 +351,7 @@ mod tests {
         assert_eq!(backend.request("test", json!({})).unwrap()["value"], 42);
         assert_eq!(&*backend.state.lock().unwrap(), "connected");
         assert_eq!(selected.lock().unwrap()["profileId"], "server");
+        assert_eq!(traffic.lock().unwrap()["downloadBps"], 512);
         assert_eq!(backend.request("bad", json!({})).unwrap_err(), "expected");
         backend.shutdown().unwrap();
         assert!(backend.request("test", json!({})).is_err());

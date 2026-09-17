@@ -4,6 +4,7 @@
   const { listen } = window.__TAURI__.event;
   const subscribers = new Set();
   const profileSubscribers = new Set();
+  const trafficSubscribers = new Set();
   const logSubscribers = new Set();
   const ready = listen('vpn:state', event => {
     for (const callback of subscribers) callback(event.payload);
@@ -15,6 +16,9 @@
   listen('vpn:profile', event => {
     for (const callback of profileSubscribers) callback(event.payload);
   }).catch(() => {});
+  listen('vpn:traffic', event => {
+    for (const callback of trafficSubscribers) callback(event.payload);
+  }).catch(() => {});
   listen('vpn:log', event => {
     for (const callback of logSubscribers) callback(event.payload);
   }).catch(() => {});
@@ -24,7 +28,7 @@
   }
   window.vpnApi = Object.freeze({
     importSubscription: (url, reason = 'manual') => call('vpn_import', { url, reason }),
-    connect: (profileId, dns = 'cloudflare', dnsServers = [], fragmentation = false, killSwitch = false, autoProfileIds = [], routeMode = 'full', directDomains = []) => call('vpn_connect', { profileId, dns, dnsServers, fragmentation, killSwitch, autoProfileIds, routeMode, directDomains }),
+    connect: (profileId, dns = 'cloudflare', dnsServers = [], fragmentation = false, killSwitch = false, autoProfileIds = [], routeMode = 'full', directDomains = [], geoIpUrl = '', geoSiteUrl = '') => call('vpn_connect', { profileId, dns, dnsServers, fragmentation, killSwitch, autoProfileIds, routeMode, directDomains, geoIpUrl, geoSiteUrl }),
     disconnect: () => call('vpn_disconnect'),
     ping: (pingMethod = 'tcp') => call('vpn_ping', { pingMethod }),
     publicIp: (masked = false) => call('vpn_public_ip', { masked }),
@@ -36,6 +40,7 @@
     clearLogs: () => call('vpn_clear_logs'),
     onStateChange: callback => { subscribers.add(callback); return () => subscribers.delete(callback); },
     onProfileChange: callback => { profileSubscribers.add(callback); return () => profileSubscribers.delete(callback); },
+    onTraffic: callback => { trafficSubscribers.add(callback); return () => trafficSubscribers.delete(callback); },
     onLog: callback => { logSubscribers.add(callback); return () => logSubscribers.delete(callback); },
   });
 })();

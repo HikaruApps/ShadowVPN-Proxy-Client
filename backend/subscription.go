@@ -251,15 +251,15 @@ func parseURI(raw string) (Profile, error) {
 			tlsSettings["verifyPeerCertByName"] = verifyName
 		}
 		stream := map[string]any{
-			"network":  "hysteria",
-			"security": "tls",
-			"tlsSettings": tlsSettings,
+			"network":          "hysteria",
+			"security":         "tls",
+			"tlsSettings":      tlsSettings,
 			"hysteriaSettings": map[string]any{"version": 2, "auth": password},
 		}
 		out := map[string]any{
-			"tag":      "proxy",
-			"protocol": "hysteria",
-			"settings": map[string]any{"version": 2, "address": u.Hostname(), "port": port},
+			"tag":            "proxy",
+			"protocol":       "hysteria",
+			"settings":       map[string]any{"version": 2, "address": u.Hostname(), "port": port},
 			"streamSettings": stream,
 		}
 		return newProfile(u.Fragment, out), nil
@@ -346,17 +346,44 @@ func makeConfigWithOptions(p Profile, dnsID string, customServers []string, frag
 type routingOptions struct {
 	Mode          string
 	DirectDomains []string
+	IPRules       []string
+	GeoIPURL      string
+	GeoSiteURL    string
+	AssetDir      string
+	NeedsGeoIP    bool
+	NeedsGeoSite  bool
 }
 
-func newRoutingOptions(mode string, directDomains []string) (routingOptions, error) {
+func validGeoDataTag(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || strings.ContainsRune("-_.@", character) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func newRoutingOptions(mode string, directDomains []string, geoIPURL, geoSiteURL string) (routingOptions, error) {
 	if mode == "" {
 		mode = "full"
 	}
 	if mode != "full" && mode != "bypass" && mode != "proxy_only" {
 		return routingOptions{}, errors.New("Неизвестный режим маршрутизации")
 	}
+	if mode == "full" {
+		// Keep the saved rules and sources in the UI, but do not activate them.
+		return routingOptions{Mode: mode}, nil
+	}
 	normalized := make([]string, 0, len(directDomains))
+	ipRules := make([]string, 0, len(directDomains))
 	seen := make(map[string]struct{}, len(directDomains))
+	needsGeoIP := false
+	needsGeoSite := false
 	for _, raw := range directDomains {
 		for _, item := range strings.Fields(strings.ReplaceAll(raw, ",", "\n")) {
 			item = strings.TrimSpace(item)
@@ -366,9 +393,26 @@ func newRoutingOptions(mode string, directDomains []string) (routingOptions, err
 			if len(item) > 255 || strings.ContainsAny(item, "\\\"'") {
 				return routingOptions{}, errors.New("Правило маршрутизации содержит недопустимый домен")
 			}
+			lowerItem := strings.ToLower(item)
+			if strings.HasPrefix(lowerItem, "geoip:") {
+				value := strings.TrimSpace(item[len("geoip:"):])
+				if !validGeoDataTag(value) {
+					return routingOptions{}, errors.New("Правило geoip: содержит недопустимое имя списка")
+				}
+				normalizedItem := "geoip:" + strings.ToLower(value)
+				if _, exists := seen[normalizedItem]; !exists {
+					seen[normalizedItem] = struct{}{}
+					ipRules = append(ipRules, normalizedItem)
+					needsGeoIP = true
+				}
+				if len(normalized)+len(ipRules) > 512 {
+					return routingOptions{}, errors.New("Можно добавить не больше 512 правил маршрутизации")
+				}
+				continue
+			}
 			prefix := "domain:"
 			value := item
-			for _, candidate := range []string{"domain:", "full:", "keyword:", "regexp:"} {
+			for _, candidate := range []string{"domain:", "full:", "keyword:", "regexp:", "geosite:"} {
 				if strings.HasPrefix(strings.ToLower(value), candidate) {
 					prefix = candidate
 					value = value[len(candidate):]
@@ -379,7 +423,13 @@ func newRoutingOptions(mode string, directDomains []string) (routingOptions, err
 			if value == "" || strings.ContainsAny(value, " \t\r\n") {
 				return routingOptions{}, errors.New("Правило маршрутизации содержит пустой или недопустимый домен")
 			}
-			if prefix == "domain:" {
+			if prefix == "geosite:" {
+				if !validGeoDataTag(value) {
+					return routingOptions{}, errors.New("Правило geosite: содержит недопустимое имя списка")
+				}
+				value = strings.ToLower(value)
+				needsGeoSite = true
+			} else if prefix == "domain:" {
 				value = strings.TrimSuffix(strings.ToLower(value), ".")
 				if strings.Contains(value, "/") || strings.Contains(value, ":") || !strings.Contains(value, ".") {
 					return routingOptions{}, errors.New("Укажите домен вроде example.com или используйте full:/keyword:")
@@ -391,19 +441,69 @@ func newRoutingOptions(mode string, directDomains []string) (routingOptions, err
 			}
 			seen[normalizedItem] = struct{}{}
 			normalized = append(normalized, normalizedItem)
-			if len(normalized) > 512 {
+			if len(normalized)+len(ipRules) > 512 {
 				return routingOptions{}, errors.New("Можно добавить не больше 512 правил маршрутизации")
 			}
 		}
 	}
-	if mode == "full" {
-		// Keep the saved list in the UI, but do not activate it in the default mode.
-		normalized = nil
+	if len(normalized)+len(ipRules) == 0 {
+		return routingOptions{}, errors.New("Для выбранного режима укажите хотя бы одно правило")
 	}
-	if mode != "full" && len(normalized) == 0 {
-		return routingOptions{}, errors.New("Для выбранного режима укажите хотя бы один домен")
+	geoIPURL, err := normalizeGeoDataURL(geoIPURL, "GeoIP")
+	if err != nil {
+		return routingOptions{}, err
 	}
-	return routingOptions{Mode: mode, DirectDomains: normalized}, nil
+	geoSiteURL, err = normalizeGeoDataURL(geoSiteURL, "GeoSite")
+	if err != nil {
+		return routingOptions{}, err
+	}
+	if needsGeoIP && geoIPURL == "" {
+		return routingOptions{}, errors.New("Для правил geoip: укажите HTTPS-ссылку на geoip.dat")
+	}
+	if needsGeoSite && geoSiteURL == "" {
+		return routingOptions{}, errors.New("Для правил geosite: укажите HTTPS-ссылку на geosite.dat")
+	}
+	return routingOptions{
+		Mode:          mode,
+		DirectDomains: normalized,
+		IPRules:       ipRules,
+		GeoIPURL:      geoIPURL,
+		GeoSiteURL:    geoSiteURL,
+		NeedsGeoIP:    needsGeoIP,
+		NeedsGeoSite:  needsGeoSite,
+	}, nil
+}
+
+func routingSelectionRules(routing routingOptions, targetKey, target string) []any {
+	rules := make([]any, 0, 2)
+	if len(routing.DirectDomains) > 0 {
+		rules = append(rules, map[string]any{
+			"type": "field", "inboundTag": []string{"tun-in"},
+			"domain": routing.DirectDomains, targetKey: target,
+		})
+	}
+	if len(routing.IPRules) > 0 {
+		rules = append(rules, map[string]any{
+			"type": "field", "inboundTag": []string{"tun-in"},
+			"ip": routing.IPRules, targetKey: target,
+		})
+	}
+	return rules
+}
+
+func attachGeoDataConfig(config map[string]any, routing routingOptions) {
+	if routing.AssetDir == "" {
+		return
+	}
+	assets := make([]any, 0, 2)
+	if routing.NeedsGeoIP {
+		assets = append(assets, map[string]any{"url": routing.GeoIPURL, "file": "geoip.dat"})
+	}
+	if routing.NeedsGeoSite {
+		assets = append(assets, map[string]any{"url": routing.GeoSiteURL, "file": "geosite.dat"})
+	}
+	config["env"] = map[string]any{"XRAY_LOCATION_ASSET": routing.AssetDir}
+	config["geodata"] = map[string]any{"cron": "0 4 * * *", "assets": assets}
 }
 
 func makeConfigWithRoutingOptions(p Profile, dnsID string, customServers []string, fragmentation bool, outboundInterface string, routing routingOptions) ([]byte, error) {
@@ -448,16 +548,17 @@ func makeAutoConfigWithRoutingOptions(profiles []Profile, dnsID string, customSe
 	}
 	rules := []any{}
 	if routing.Mode == "bypass" {
-		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "domain": routing.DirectDomains, "outboundTag": "direct"})
+		rules = append(rules, routingSelectionRules(routing, "outboundTag", "direct")...)
 	} else if routing.Mode == "proxy_only" {
-		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "domain": routing.DirectDomains, "balancerTag": "shadow-auto"})
+		rules = append(rules, routingSelectionRules(routing, "balancerTag", "shadow-auto")...)
 		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "outboundTag": "direct"})
 	}
 	if routing.Mode != "proxy_only" {
 		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "balancerTag": "shadow-auto"})
 	}
 	config["routing"] = map[string]any{
-		"rules": rules,
+		"domainStrategy": "IPIfNonMatch",
+		"rules":          rules,
 		"balancers": []any{map[string]any{
 			"tag":         "shadow-auto",
 			"selector":    []string{"auto-"},
@@ -465,6 +566,7 @@ func makeAutoConfigWithRoutingOptions(profiles []Profile, dnsID string, customSe
 			"strategy":    map[string]any{"type": "leastping"},
 		}},
 	}
+	attachGeoDataConfig(config, routing)
 	return json.Marshal(config)
 }
 
@@ -512,17 +614,23 @@ func runtimeConfigWithRouting(outbounds []any, dns dnsPreset, outboundInterface 
 		"log":       map[string]any{"loglevel": "debug"},
 		"inbounds":  []any{map[string]any{"tag": "tun-in", "protocol": "tun", "sniffing": map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}}, "settings": map[string]any{"name": "ShadowVPN", "desc": "ShadowVPN", "mtu": 1500, "gateway": []string{"172.31.255.1/30", "fd31:ffff::1/126"}, "dns": dns.Servers, "autoSystemRoutingTable": []string{"0.0.0.0/0", "::/0"}, "autoOutboundsInterface": outboundInterface}}},
 		"outbounds": runtimeOutbounds,
+		"policy": map[string]any{"system": map[string]any{
+			"statsInboundUplink":   true,
+			"statsInboundDownlink": true,
+		}},
+		"stats": map[string]any{},
 	}
-	if routing.Mode != "full" && len(routing.DirectDomains) > 0 {
+	if routing.Mode != "full" && (len(routing.DirectDomains) > 0 || len(routing.IPRules) > 0) {
 		rules := []any{}
 		if routing.Mode == "proxy_only" {
-			rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "domain": routing.DirectDomains, "outboundTag": "proxy"})
+			rules = append(rules, routingSelectionRules(routing, "outboundTag", "proxy")...)
 			rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "outboundTag": "direct"})
 		} else {
-			rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "domain": routing.DirectDomains, "outboundTag": "direct"})
+			rules = append(rules, routingSelectionRules(routing, "outboundTag", "direct")...)
 		}
 		config["routing"] = map[string]any{"domainStrategy": "IPIfNonMatch", "rules": rules}
 	}
+	attachGeoDataConfig(config, routing)
 	return config
 }
 

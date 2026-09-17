@@ -40,6 +40,8 @@ type request struct {
 	PingMethod     string   `json:"pingMethod"`
 	RouteMode      string   `json:"routeMode"`
 	DirectDomains  []string `json:"directDomains"`
+	GeoIPURL       string   `json:"geoIpUrl"`
+	GeoSiteURL     string   `json:"geoSiteUrl"`
 }
 
 type connectionInfo struct {
@@ -58,6 +60,8 @@ type worker struct {
 	activeMu      sync.RWMutex
 	autoCancel    context.CancelFunc
 	autoWG        sync.WaitGroup
+	trafficCancel context.CancelFunc
+	trafficWG     sync.WaitGroup
 	killSwitch    *killSwitchGuard
 	enc           *json.Encoder
 	mu            sync.Mutex
@@ -170,6 +174,7 @@ func (w *worker) startAutoMonitor(parent context.Context, instance *core.Instanc
 }
 func (w *worker) close() error {
 	w.stopAutoMonitor()
+	w.stopTrafficMonitor()
 	w.clearActiveProfile()
 	var closeErr error
 	if w.instance == nil {
@@ -207,14 +212,14 @@ func profilesByID(profiles []Profile, ids []string) []Profile {
 	return result
 }
 
-func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoProfileIDs, directDomains []string, routeMode string, fragmentation, killSwitch bool) error {
+func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoProfileIDs, directDomains []string, routeMode, geoIPURL, geoSiteURL string, fragmentation, killSwitch bool) error {
 	w.logf("connect requested profile_id=%s", id)
 	validatedDNSID, dns, err := selectedDNS(dnsID, customDNS)
 	if err != nil {
 		w.logf("connect rejected: invalid DNS preset")
 		return err
 	}
-	routing, routingErr := newRoutingOptions(routeMode, directDomains)
+	routing, routingErr := newRoutingOptions(routeMode, directDomains, geoIPURL, geoSiteURL)
 	if routingErr != nil {
 		w.logf("connect rejected: invalid routing settings: %v", routingErr)
 		return routingErr
@@ -223,7 +228,7 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 		w.logf("connect rejected: kill switch cannot be combined with split routing mode=%s", routing.Mode)
 		return errors.New("Kill Switch отключает прямой трафик, поэтому выключите его для выборочной маршрутизации")
 	}
-	w.logf("DNS selected id=%s name=%s; routing_mode=%s direct_domains=%d; TLS fragmentation=%t; kill_switch=%t", validatedDNSID, dns.Name, routing.Mode, len(routing.DirectDomains), fragmentation, killSwitch)
+	w.logf("DNS selected id=%s name=%s; routing_mode=%s domain_rules=%d ip_rules=%d geodata=%t; TLS fragmentation=%t; kill_switch=%t", validatedDNSID, dns.Name, routing.Mode, len(routing.DirectDomains), len(routing.IPRules), routing.NeedsGeoIP || routing.NeedsGeoSite, fragmentation, killSwitch)
 	if runtime.GOOS != "windows" {
 		w.logf("connect rejected: unsupported platform=%s", runtime.GOOS)
 		return errors.New("Эта сборка клиента поддерживает TUN только на Windows")
@@ -343,6 +348,17 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 		}
 		w.logf("kill switch pinned Xray outbound interface=%s", outboundInterface)
 	}
+	if routing.NeedsGeoIP || routing.NeedsGeoSite {
+		w.logf("GeoData bootstrap started geoip=%t geosite=%t", routing.NeedsGeoIP, routing.NeedsGeoSite)
+		geoDataCtx, geoDataCancel := context.WithTimeout(ctx, 45*time.Second)
+		e = prepareGeoData(geoDataCtx, &routing)
+		geoDataCancel()
+		if e != nil {
+			w.logf("GeoData bootstrap failed: %v", e)
+			return e
+		}
+		w.logf("GeoData bootstrap completed; native daily refresh enabled")
+	}
 	w.logf("creating Xray TUN configuration with pre-resolved endpoint=%s", bootstrap.SelectedAddress)
 	var config []byte
 	if isAuto {
@@ -415,6 +431,7 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 	w.logf("connectivity probe passed; tunnel is ready")
 	w.setActiveProfile(*selected)
 	w.setState("connected")
+	w.startTrafficMonitor(ctx, instance)
 	if isAuto {
 		w.logf("continuous auto fallback active candidates=%d interval=%s", len(autoProfiles), autoProbeInterval)
 		w.startAutoMonitor(ctx, instance, autoProfiles, *selected)
@@ -506,7 +523,7 @@ func main() {
 					}
 				}
 			case "connect":
-				err = w.connect(ctx, r.ProfileID, r.DNS, r.DNSServers, r.AutoProfileIDs, r.DirectDomains, r.RouteMode, r.Fragment, r.KillSwitch)
+				err = w.connect(ctx, r.ProfileID, r.DNS, r.DNSServers, r.AutoProfileIDs, r.DirectDomains, r.RouteMode, r.GeoIPURL, r.GeoSiteURL, r.Fragment, r.KillSwitch)
 				if err == nil {
 					result = w.currentActiveProfile()
 				}

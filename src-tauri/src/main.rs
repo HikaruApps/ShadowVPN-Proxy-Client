@@ -29,6 +29,21 @@ async fn query(service: &Service, method: &'static str, data: Value) -> Result<V
         .await
         .map_err(|_| "Ошибка потока ядра".to_string())?
 }
+
+fn validate_geodata_url(value: Option<String>, title: &str) -> Result<String, String> {
+    let value = value.unwrap_or_default().trim().to_string();
+    if value.is_empty() {
+        return Ok(value);
+    }
+    if value.len() > 2048
+        || !value.starts_with("https://")
+        || value.chars().any(char::is_whitespace)
+        || value.contains('#')
+    {
+        return Err(format!("{title}: нужна корректная HTTPS-ссылка"));
+    }
+    Ok(value)
+}
 #[tauri::command]
 async fn vpn_import(url: String, reason: Option<String>, service: State<'_, Service>) -> Result<Value, String> {
     if url.len() > 8192 || !url.starts_with("https://") {
@@ -51,6 +66,8 @@ async fn vpn_connect(
     auto_profile_ids: Option<Vec<String>>,
     route_mode: Option<String>,
     direct_domains: Option<Vec<String>>,
+    geo_ip_url: Option<String>,
+    geo_site_url: Option<String>,
     service: State<'_, Service>,
 ) -> Result<Value, String> {
     if profile_id.len() != 24 || !profile_id.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -65,6 +82,14 @@ async fn vpn_connect(
     if direct_domains.len() > 512 || direct_domains.iter().any(|domain| domain.len() > 255) {
         return Err("Слишком много правил маршрутизации".into());
     }
+    let (geo_ip_url, geo_site_url) = if route_mode == "full" {
+        (String::new(), String::new())
+    } else {
+        (
+            validate_geodata_url(geo_ip_url, "GeoIP")?,
+            validate_geodata_url(geo_site_url, "GeoSite")?,
+        )
+    };
     if auto_profile_ids.len() > 512
         || auto_profile_ids.iter().any(|id| id.len() != 24 || !id.bytes().all(|b| b.is_ascii_hexdigit()) || id.bytes().all(|b| b == b'0'))
     {
@@ -80,7 +105,7 @@ async fn vpn_connect(
     call(
         &service,
         "connect",
-        json!({"profileId":profile_id,"dns":dns,"dnsServers":dns_servers,"fragmentation":fragmentation.unwrap_or(false),"killSwitch":kill_switch.unwrap_or(false),"autoProfileIds":auto_profile_ids,"routeMode":route_mode,"directDomains":direct_domains}),
+        json!({"profileId":profile_id,"dns":dns,"dnsServers":dns_servers,"fragmentation":fragmentation.unwrap_or(false),"killSwitch":kill_switch.unwrap_or(false),"autoProfileIds":auto_profile_ids,"routeMode":route_mode,"directDomains":direct_domains,"geoIpUrl":geo_ip_url,"geoSiteUrl":geo_site_url}),
     )
     .await
 }
@@ -214,6 +239,7 @@ fn main() {
             };
             let state_handle = app.handle().clone();
             let profile_handle = app.handle().clone();
+            let traffic_handle = app.handle().clone();
             let log_handle = app.handle().clone();
             let service = Backend::spawn(
                 &directory.join(name),
@@ -222,6 +248,9 @@ fn main() {
                 },
                 move |profile| {
                     let _ = profile_handle.emit("vpn:profile", profile);
+                },
+                move |traffic| {
+                    let _ = traffic_handle.emit("vpn:traffic", traffic);
                 },
                 move |line| {
                     let _ = log_handle.emit("vpn:log", line);

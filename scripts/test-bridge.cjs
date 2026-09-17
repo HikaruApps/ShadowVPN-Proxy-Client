@@ -18,6 +18,11 @@ vm.runInNewContext(fs.readFileSync('src/renderer/tauri-bridge.js', 'utf8'), { wi
   assert.equal(profile.name, 'Berlin');
   stopProfiles(); listeners.get('vpn:profile')({ payload: { profileId: 'other', name: 'Paris' } });
   assert.equal(profile.name, 'Berlin');
+  let traffic; const stopTraffic = window.vpnApi.onTraffic(value => { traffic = value; });
+  listeners.get('vpn:traffic')({ payload: { uploadBytes: 1024, downloadBytes: 2048, uploadBps: 256, downloadBps: 512 } });
+  assert.equal(traffic.downloadBps, 512);
+  stopTraffic(); listeners.get('vpn:traffic')({ payload: { downloadBps: 1 } });
+  assert.equal(traffic.downloadBps, 512);
   assert.equal((await window.vpnApi.connect('abcdef')).ok, true);
   assert.equal(calls.at(-1)[0], 'vpn_connect'); assert.equal(calls.at(-1)[1].profileId, 'abcdef');
   assert.equal(calls.at(-1)[1].dns, 'cloudflare');
@@ -36,6 +41,9 @@ vm.runInNewContext(fs.readFileSync('src/renderer/tauri-bridge.js', 'utf8'), { wi
   await window.vpnApi.connect('abcdef', 'cloudflare', [], false, false, [], 'bypass', ['example.com', 'full:private.example.com']);
   assert.equal(calls.at(-1)[1].routeMode, 'bypass');
   assert.deepEqual([...calls.at(-1)[1].directDomains], ['example.com', 'full:private.example.com']);
+  await window.vpnApi.connect('abcdef', 'cloudflare', [], false, false, [], 'bypass', ['geosite:youtube', 'geoip:ru'], 'https://example.com/geoip.dat', 'https://example.com/geosite.dat');
+  assert.equal(calls.at(-1)[1].geoIpUrl, 'https://example.com/geoip.dat');
+  assert.equal(calls.at(-1)[1].geoSiteUrl, 'https://example.com/geosite.dat');
   assert.equal((await window.vpnApi.importSubscription('https://example.com', 'automatic')).error, 'Import failed');
   assert.equal(calls.at(-1)[1].reason, 'automatic');
   await window.vpnApi.disconnect(); assert.equal(calls.at(-1)[0], 'vpn_disconnect');
@@ -49,5 +57,5 @@ vm.runInNewContext(fs.readFileSync('src/renderer/tauri-bridge.js', 'utf8'), { wi
   let logLine; const stopLogs = window.vpnApi.onLog(value => { logLine = value; });
   listeners.get('vpn:log')({ payload: 'Xray diagnostic' }); assert.equal(logLine, 'Xray diagnostic'); stopLogs();
   listeners.get('vpn:error')({payload:'Shutdown pending'}); assert.equal(elements.statusText.textContent, 'Shutdown pending');
-  console.log('Tauri bridge: state/profile listeners, unsubscribe, commands, errors passed.');
+  console.log('Tauri bridge: state/profile/traffic listeners, unsubscribe, commands, errors passed.');
 })().catch(e => { console.error(e); process.exit(1); });
