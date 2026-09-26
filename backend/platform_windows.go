@@ -3,11 +3,16 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
@@ -20,7 +25,11 @@ const (
 )
 
 type killSwitchGuard struct {
-	engine uintptr
+	engine      uintptr
+	providerKey windows.GUID
+	sublayerKey windows.GUID
+	mu          sync.Mutex
+	endpoints   map[proxyEndpoint]struct{}
 }
 
 func checkPlatform() error {
@@ -110,11 +119,34 @@ func startKillSwitchGuard(endpoints []proxyEndpoint) (*killSwitchGuard, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine, err := enableWFPKillSwitch(luid, endpoints)
+	session, err := enableWFPKillSwitch(luid, endpoints)
 	if err != nil {
 		return nil, err
 	}
-	return &killSwitchGuard{engine: engine}, nil
+	allowed := make(map[proxyEndpoint]struct{}, len(endpoints))
+	for _, endpoint := range endpoints {
+		allowed[endpoint] = struct{}{}
+	}
+	return &killSwitchGuard{
+		engine: session.engine, providerKey: session.providerKey,
+		sublayerKey: session.sublayerKey, endpoints: allowed,
+	}, nil
+}
+
+func (guard *killSwitchGuard) AllowEndpoint(endpoint proxyEndpoint) error {
+	if guard == nil || guard.engine == 0 {
+		return nil
+	}
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	if _, exists := guard.endpoints[endpoint]; exists {
+		return nil
+	}
+	if err := installWFPEndpointFilters(guard.engine, guard.providerKey, guard.sublayerKey, []proxyEndpoint{endpoint}, len(guard.endpoints)); err != nil {
+		return err
+	}
+	guard.endpoints[endpoint] = struct{}{}
+	return nil
 }
 
 func (guard *killSwitchGuard) Close() error {
@@ -124,6 +156,37 @@ func (guard *killSwitchGuard) Close() error {
 	err := closeWFPEngine(guard.engine)
 	guard.engine = 0
 	return err
+}
+
+func interfaceDialer(interfaceName string, timeout time.Duration) (*net.Dialer, error) {
+	dialer := &net.Dialer{Timeout: timeout}
+	if interfaceName == "" {
+		return dialer, nil
+	}
+	physicalInterface, err := net.InterfaceByName(interfaceName)
+	if err != nil {
+		return nil, err
+	}
+	dialer.Control = func(_, address string, raw syscall.RawConn) error {
+		var socketErr error
+		controlErr := raw.Control(func(fd uintptr) {
+			host, _, splitErr := net.SplitHostPort(address)
+			if splitErr != nil {
+				socketErr = splitErr
+				return
+			}
+			if ip := net.ParseIP(host); ip != nil && ip.To4() != nil {
+				var bytes [4]byte
+				binary.BigEndian.PutUint32(bytes[:], uint32(physicalInterface.Index))
+				index := *(*uint32)(unsafe.Pointer(&bytes[0]))
+				socketErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.IPPROTO_IP, 31, int(index))
+			} else {
+				socketErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.IPPROTO_IPV6, 31, physicalInterface.Index)
+			}
+		})
+		return errors.Join(controlErr, socketErr)
+	}
+	return dialer, nil
 }
 
 // Version 0.8 used a second Wintun adapter as a route guard. Remove any

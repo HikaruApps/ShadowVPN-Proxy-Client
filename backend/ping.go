@@ -26,6 +26,11 @@ type PingResult struct {
 	ResolvedAddress string `json:"-"`
 }
 
+type pingOptions struct {
+	OutboundInterface string
+	AllowEndpoint     func(proxyEndpoint) error
+}
+
 func endpointFromOutbound(out map[string]any) (string, int) {
 	settings, _ := out["settings"].(map[string]any)
 	protocol, _ := out["protocol"].(string)
@@ -69,11 +74,24 @@ func tcpPing(ctx context.Context, address string, port int) (int64, error) {
 }
 
 func tcpPingEndpoint(ctx context.Context, address string, port int) (int64, string, error) {
+	return tcpPingEndpointWithOptions(ctx, address, port, pingOptions{})
+}
+
+func tcpPingEndpointWithOptions(ctx context.Context, address string, port int, options pingOptions) (int64, string, error) {
 	if address == "" || port < 1 || port > 65535 {
 		return 0, "", fmt.Errorf("missing endpoint")
 	}
+	if options.AllowEndpoint != nil {
+		if err := options.AllowEndpoint(proxyEndpoint{Address: address, Port: port}); err != nil {
+			return 0, "", err
+		}
+	}
+	dialer, err := interfaceDialer(options.OutboundInterface, 2500*time.Millisecond)
+	if err != nil {
+		return 0, "", err
+	}
 	started := time.Now()
-	connection, err := (&net.Dialer{Timeout: 2500 * time.Millisecond}).DialContext(
+	connection, err := dialer.DialContext(
 		ctx,
 		"tcp",
 		net.JoinHostPort(address, strconv.Itoa(port)),
@@ -98,9 +116,18 @@ func pingProfiles(parent context.Context, profiles []Profile) []PingResult {
 }
 
 func httpPingProfile(ctx context.Context, profile Profile, method string) (int64, string, error) {
+	return httpPingProfileWithOptions(ctx, profile, method, pingOptions{})
+}
+
+func httpPingProfileWithOptions(ctx context.Context, profile Profile, method string, options pingOptions) (int64, string, error) {
 	resolved, bootstrap, err := resolveProfileEndpoint(ctx, profile)
 	if err != nil {
 		return 0, "", err
+	}
+	if options.AllowEndpoint != nil {
+		if err = options.AllowEndpoint(proxyEndpoint{Address: resolved.Address, Port: resolved.Port}); err != nil {
+			return 0, "", err
+		}
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -117,12 +144,17 @@ func httpPingProfile(ctx context.Context, profile Profile, method string) (int64
 	if err != nil {
 		return 0, "", err
 	}
+	if options.OutboundInterface != "" {
+		stream := nestedMap(outbound, "streamSettings")
+		sockopt := nestedMap(stream, "sockopt")
+		sockopt["interface"] = options.OutboundInterface
+	}
 	config, err := json.Marshal(map[string]any{
 		"log": map[string]any{"loglevel": "none"},
 		"inbounds": []any{map[string]any{
 			"tag": "probe-in", "listen": "127.0.0.1", "port": port, "protocol": "http",
 			"settings": map[string]any{
-				"timeout": 8,
+				"timeout":  8,
 				"accounts": []any{map[string]any{"user": "shadowvpn", "pass": probePassword}},
 			},
 		}},
@@ -145,12 +177,12 @@ func httpPingProfile(ctx context.Context, profile Profile, method string) (int64
 	}
 	proxyURL := &url.URL{
 		Scheme: "http",
-		Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
-		User: url.UserPassword("shadowvpn", probePassword),
+		Host:   net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+		User:   url.UserPassword("shadowvpn", probePassword),
 	}
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(proxyURL), DisableKeepAlives: true,
-		DialContext: (&net.Dialer{Timeout: 4 * time.Second}).DialContext,
+		DialContext:         (&net.Dialer{Timeout: 4 * time.Second}).DialContext,
 		TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 7 * time.Second,
 	}
 	defer transport.CloseIdleConnections()
@@ -180,6 +212,10 @@ func httpPingProfile(ctx context.Context, profile Profile, method string) (int64
 }
 
 func pingProfilesWithMethod(parent context.Context, profiles []Profile, method string) []PingResult {
+	return pingProfilesWithMethodOptions(parent, profiles, method, pingOptions{})
+}
+
+func pingProfilesWithMethodOptions(parent context.Context, profiles []Profile, method string, options pingOptions) []PingResult {
 	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
 	results := make([]PingResult, len(profiles))
@@ -210,9 +246,17 @@ func pingProfilesWithMethod(parent context.Context, profiles []Profile, method s
 				var resolvedAddress string
 				var err error
 				if probeMethod == "head" || probeMethod == "get" {
-					latency, resolvedAddress, err = httpPingProfile(ctx, profile, probeMethod)
+					latency, resolvedAddress, err = httpPingProfileWithOptions(ctx, profile, probeMethod, options)
 				} else {
-					latency, resolvedAddress, err = tcpPingEndpoint(ctx, profile.Address, profile.Port)
+					if options.OutboundInterface != "" {
+						var resolved Profile
+						resolved, _, err = resolveProfileEndpoint(ctx, profile)
+						if err == nil {
+							latency, resolvedAddress, err = tcpPingEndpointWithOptions(ctx, resolved.Address, resolved.Port, options)
+						}
+					} else {
+						latency, resolvedAddress, err = tcpPingEndpointWithOptions(ctx, profile.Address, profile.Port, options)
+					}
 				}
 				results[index] = PingResult{ID: profile.ID, LatencyMS: latency, Available: err == nil, ResolvedAddress: resolvedAddress}
 			}

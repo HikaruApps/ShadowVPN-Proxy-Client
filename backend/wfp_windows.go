@@ -300,7 +300,7 @@ func endpointCondition(address string) (wfpCondition, *wfpByteArray16, windows.G
 	}, array, wfpLayerConnectV6, nil
 }
 
-func installWFPFilters(engine uintptr, providerKey, sublayerKey windows.GUID, tunnelLUID uint64, endpoints []proxyEndpoint) error {
+func installWFPEndpointFilters(engine uintptr, providerKey, sublayerKey windows.GUID, endpoints []proxyEndpoint, nameOffset int) error {
 	appID, err := currentProcessAppID()
 	if err != nil {
 		return err
@@ -316,11 +316,18 @@ func installWFPFilters(engine uintptr, providerKey, sublayerKey windows.GUID, tu
 			endpoint,
 			{fieldKey: wfpConditionRemotePort, match: wfpMatchEqual, value: wfpScalar(wfpUint16, uintptr(candidate.Port))},
 		}
-		name := fmt.Sprintf("Permit Xray VPN endpoint %d", index+1)
+		name := fmt.Sprintf("Permit Xray VPN endpoint %d", nameOffset+index+1)
 		if err := addWFPFilter(engine, providerKey, sublayerKey, name, endpointLayer, 15, wfpActionPermit, endpointConditions); err != nil {
 			return err
 		}
 		runtime.KeepAlive(endpointBytes)
+	}
+	return nil
+}
+
+func installWFPFilters(engine uintptr, providerKey, sublayerKey windows.GUID, tunnelLUID uint64, endpoints []proxyEndpoint) error {
+	if err := installWFPEndpointFilters(engine, providerKey, sublayerKey, endpoints, 0); err != nil {
+		return err
 	}
 
 	tunnelCondition := []wfpCondition{{
@@ -392,24 +399,30 @@ func installWFPFilters(engine uintptr, providerKey, sublayerKey windows.GUID, tu
 	return addWFPFilter(engine, providerKey, sublayerKey, "Block direct outbound IPv6", wfpLayerConnectV6, 0, wfpActionBlock, nil)
 }
 
-func enableWFPKillSwitch(tunnelLUID uint64, endpoints []proxyEndpoint) (uintptr, error) {
+type wfpKillSwitchSession struct {
+	engine      uintptr
+	providerKey windows.GUID
+	sublayerKey windows.GUID
+}
+
+func enableWFPKillSwitch(tunnelLUID uint64, endpoints []proxyEndpoint) (wfpKillSwitchSession, error) {
 	if tunnelLUID == 0 {
-		return 0, errors.New("ShadowVPN TUN interface has no LUID")
+		return wfpKillSwitchSession{}, errors.New("ShadowVPN TUN interface has no LUID")
 	}
 	if len(endpoints) == 0 {
-		return 0, errors.New("no VPN endpoints were provided")
+		return wfpKillSwitchSession{}, errors.New("no VPN endpoints were provided")
 	}
 	for _, endpoint := range endpoints {
 		if net.ParseIP(endpoint.Address) == nil {
-			return 0, errors.New("WFP endpoint must be a resolved IP address")
+			return wfpKillSwitchSession{}, errors.New("WFP endpoint must be a resolved IP address")
 		}
 		if endpoint.Port < 1 || endpoint.Port > 65535 {
-			return 0, errors.New("invalid VPN endpoint port")
+			return wfpKillSwitchSession{}, errors.New("invalid VPN endpoint port")
 		}
 	}
 	engine, err := openWFPEngine()
 	if err != nil {
-		return 0, err
+		return wfpKillSwitchSession{}, err
 	}
 	committed := false
 	defer func() {
@@ -418,7 +431,7 @@ func enableWFPKillSwitch(tunnelLUID uint64, endpoints []proxyEndpoint) (uintptr,
 		}
 	}()
 	if err := wfpCall("FwpmTransactionBegin0", procTransactionBegin, engine, 0); err != nil {
-		return 0, err
+		return wfpKillSwitchSession{}, err
 	}
 	abort := true
 	defer func() {
@@ -428,15 +441,15 @@ func enableWFPKillSwitch(tunnelLUID uint64, endpoints []proxyEndpoint) (uintptr,
 	}()
 	providerKey, sublayerKey, err := registerWFPObjects(engine)
 	if err != nil {
-		return 0, err
+		return wfpKillSwitchSession{}, err
 	}
 	if err := installWFPFilters(engine, providerKey, sublayerKey, tunnelLUID, endpoints); err != nil {
-		return 0, err
+		return wfpKillSwitchSession{}, err
 	}
 	if err := wfpCall("FwpmTransactionCommit0", procTransactionCommit, engine); err != nil {
-		return 0, err
+		return wfpKillSwitchSession{}, err
 	}
 	abort = false
 	committed = true
-	return engine, nil
+	return wfpKillSwitchSession{engine: engine, providerKey: providerKey, sublayerKey: sublayerKey}, nil
 }

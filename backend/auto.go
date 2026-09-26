@@ -99,7 +99,11 @@ func pingProfilesWithAuto(parent context.Context, profiles []Profile) []PingResu
 }
 
 func pingProfilesWithAutoMethod(parent context.Context, profiles []Profile, method string) []PingResult {
-	results := pingProfilesWithMethod(parent, profiles, method)
+	return pingProfilesWithAutoMethodOptions(parent, profiles, method, pingOptions{})
+}
+
+func pingProfilesWithAutoMethodOptions(parent context.Context, profiles []Profile, method string, options pingOptions) []PingResult {
+	results := pingProfilesWithMethodOptions(parent, profiles, method, options)
 	auto := PingResult{ID: autoProfileID}
 	if _, best, ok := fastestProfile(profiles, results); ok {
 		auto.Available = true

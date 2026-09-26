@@ -565,12 +565,22 @@ func main() {
 					method = "tcp"
 				}
 				w.logf("latency test requested method=%s profiles=%d", method, len(w.profiles))
-				if w.instance != nil {
-					err = errors.New("Отключите VPN перед проверкой задержки")
-				} else if len(w.profiles) == 0 {
+				if len(w.profiles) == 0 {
 					err = errors.New("Сначала добавьте подписку")
 				} else {
-					result = pingProfilesWithAutoMethod(ctx, w.profiles, method)
+					options := pingOptions{}
+					if w.instance != nil {
+						options.OutboundInterface, err = physicalOutboundInterface()
+						if err == nil && w.killSwitch != nil {
+							options.AllowEndpoint = w.killSwitch.AllowEndpoint
+						}
+						if err == nil {
+							w.logf("latency test pinned to physical interface=%s", options.OutboundInterface)
+						}
+					}
+					if err == nil {
+						result = pingProfilesWithAutoMethodOptions(ctx, w.profiles, method, options)
+					}
 					w.logf("latency test completed method=%s", method)
 				}
 			case "disconnect":

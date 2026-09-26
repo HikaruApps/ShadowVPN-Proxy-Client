@@ -495,7 +495,7 @@ function updatePingButton() {
     || currentState === "connecting"
     || currentState === "disconnecting"
     || (currentState === "disconnected" && !selectedGroupId);
-  pingBtn.disabled = requestBusy || currentState !== "disconnected" || serverProfiles.length === 0;
+  pingBtn.disabled = requestBusy || !["disconnected", "connected"].includes(currentState) || serverProfiles.length === 0;
   syncSubscriptionBtn.disabled = requestBusy || currentState !== "disconnected";
   manageSubscriptionsBtn.disabled = requestBusy || currentState !== "disconnected";
   groupsMenuItem.disabled = requestBusy || currentState !== "disconnected";
@@ -960,7 +960,7 @@ async function changeConnection(action = "toggle") {
 powerBtn.addEventListener("click", () => void changeConnection("toggle"));
 
 async function runPingTest() {
-  if (requestBusy || currentState !== "disconnected" || serverProfiles.length === 0) return;
+  if (requestBusy || !["disconnected", "connected"].includes(currentState) || serverProfiles.length === 0) return;
   requestBusy = true;
   powerBtn.disabled = true;
   pingBtn.classList.add("testing");
