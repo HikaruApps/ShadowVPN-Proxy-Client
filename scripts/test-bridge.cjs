@@ -69,6 +69,9 @@ vm.runInNewContext(fs.readFileSync('src/renderer/tauri-bridge.js', 'utf8'), { wi
   let updateProgress; const stopUpdateProgress = window.vpnApi.onUpdateProgress(value => { updateProgress = value; });
   listeners.get('vpn:update-progress')({ payload: { downloaded: 512, total: 1024 } });
   assert.equal(updateProgress.downloaded, 512); stopUpdateProgress();
+  let trayAction; const stopTrayActions = window.vpnApi.onTrayAction(value => { trayAction = value; });
+  listeners.get('vpn:tray-action')({ payload: 'connect' }); assert.equal(trayAction, 'connect');
+  stopTrayActions(); listeners.get('vpn:tray-action')({ payload: 'disconnect' }); assert.equal(trayAction, 'connect');
   listeners.get('vpn:error')({payload:'Shutdown pending'}); assert.equal(elements.statusText.textContent, 'Shutdown pending');
-  console.log('Tauri bridge: state/profile/traffic listeners, unsubscribe, commands, errors passed.');
+  console.log('Tauri bridge: state/profile/traffic/tray listeners, unsubscribe, commands, errors passed.');
 })().catch(e => { console.error(e); process.exit(1); });

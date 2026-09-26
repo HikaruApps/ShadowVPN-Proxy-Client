@@ -7,6 +7,7 @@
   const trafficSubscribers = new Set();
   const logSubscribers = new Set();
   const updateProgressSubscribers = new Set();
+  const trayActionSubscribers = new Set();
   const ready = listen('vpn:state', event => {
     for (const callback of subscribers) callback(event.payload);
   });
@@ -25,6 +26,9 @@
   }).catch(() => {});
   listen('vpn:update-progress', event => {
     for (const callback of updateProgressSubscribers) callback(event.payload);
+  }).catch(() => {});
+  listen('vpn:tray-action', event => {
+    for (const callback of trayActionSubscribers) callback(event.payload);
   }).catch(() => {});
   async function call(command, args = {}) {
     try { await ready; return { ok: true, result: await invoke(command, args) }; }
@@ -51,5 +55,6 @@
     onTraffic: callback => { trafficSubscribers.add(callback); return () => trafficSubscribers.delete(callback); },
     onLog: callback => { logSubscribers.add(callback); return () => logSubscribers.delete(callback); },
     onUpdateProgress: callback => { updateProgressSubscribers.add(callback); return () => updateProgressSubscribers.delete(callback); },
+    onTrayAction: callback => { trayActionSubscribers.add(callback); return () => trayActionSubscribers.delete(callback); },
   });
 })();

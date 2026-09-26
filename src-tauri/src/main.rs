@@ -6,7 +6,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tauri::{Emitter, Manager, State};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, State,
+};
 use tauri_plugin_updater::UpdaterExt;
 
 const AUTOSTART_TASK_NAME: &str = "ShadowVPN Auto Start";
@@ -343,7 +347,15 @@ fn vpn_clear_logs(service: State<'_, Service>) -> Result<(), String> {
     Ok(())
 }
 
-fn request_exit(app: tauri::AppHandle) {
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn request_shutdown(app: tauri::AppHandle, restart: bool) {
     if app.state::<Closing>().active.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -361,7 +373,11 @@ fn request_exit(app: tauri::AppHandle) {
                 app.state::<Closing>()
                     .finished
                     .store(true, Ordering::Release);
-                app.exit(0);
+                if restart {
+                    app.restart();
+                } else {
+                    app.exit(0);
+                }
             }
             Err(e) => {
                 app.state::<Closing>()
@@ -372,18 +388,78 @@ fn request_exit(app: tauri::AppHandle) {
         }
     });
 }
+
+fn request_exit(app: tauri::AppHandle) {
+    request_shutdown(app, false);
+}
+
+fn request_restart(app: tauri::AppHandle) {
+    request_shutdown(app, true);
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Closing::default())
         .manage(Updating::default())
         .setup(|app| {
+            let open_item =
+                MenuItem::with_id(app, "tray-open", "Открыть ShadowVPN", true, None::<&str>)?;
+            let connect_item =
+                MenuItem::with_id(app, "tray-connect", "Включить VPN", true, None::<&str>)?;
+            let disconnect_item =
+                MenuItem::with_id(app, "tray-disconnect", "Выключить VPN", false, None::<&str>)?;
+            let restart_item =
+                MenuItem::with_id(app, "tray-restart", "Перезапустить", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "tray-quit", "Выйти", true, None::<&str>)?;
+            let first_separator = PredefinedMenuItem::separator(app)?;
+            let second_separator = PredefinedMenuItem::separator(app)?;
+            let tray_menu = Menu::with_items(
+                app,
+                &[
+                    &open_item,
+                    &first_separator,
+                    &connect_item,
+                    &disconnect_item,
+                    &second_separator,
+                    &restart_item,
+                    &quit_item,
+                ],
+            )?;
+            let mut tray_builder = TrayIconBuilder::new()
+                .tooltip("ShadowVPN")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "tray-open" => show_main_window(app),
+                    "tray-connect" => {
+                        let _ = app.emit("vpn:tray-action", "connect");
+                    }
+                    "tray-disconnect" => {
+                        let _ = app.emit("vpn:tray-action", "disconnect");
+                    }
+                    "tray-restart" => request_restart(app.clone()),
+                    "tray-quit" => request_exit(app.clone()),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+            tray_builder.build(app)?;
+
             let name = if cfg!(windows) {
                 "shadowvpn-core.exe"
             } else {
@@ -398,9 +474,13 @@ fn main() {
             let profile_handle = app.handle().clone();
             let traffic_handle = app.handle().clone();
             let log_handle = app.handle().clone();
+            let connect_menu_item = connect_item.clone();
+            let disconnect_menu_item = disconnect_item.clone();
             let service = Backend::spawn(
                 &directory.join(name),
                 move |state| {
+                    let _ = connect_menu_item.set_enabled(state == "disconnected");
+                    let _ = disconnect_menu_item.set_enabled(state == "connected");
                     let _ = state_handle.emit("vpn:state", state);
                 },
                 move |profile| {

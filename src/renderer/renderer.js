@@ -884,10 +884,12 @@ function applyPushedState(state) {
   applyState(state);
 }
 
-powerBtn.addEventListener("click", async () => {
+async function changeConnection(action = "toggle") {
   if (requestBusy || currentState === "connecting" || currentState === "disconnecting") return;
+  if (action === "connect" && currentState === "connected") return;
+  if (action === "disconnect" && currentState === "disconnected") return;
   if (!serverProfiles.length) { statusText.textContent = "Сначала добавьте подписку"; return; }
-  const disconnecting = currentState === "connected";
+  const disconnecting = action === "disconnect" || (action === "toggle" && currentState === "connected");
   const selectedIsAuto = !disconnecting && [AUTO_PROFILE_ID, AUTO_NO_RU_PROFILE_ID].includes(selectedGroupId);
   const selectedAutoGroup = selectedIsAuto ? groupStore.activeGroup(groupState) : null;
   const selectedAutoProfileIds = selectedIsAuto ? autoProfilesFor(selectedGroupId).map(profile => profile.id) : [];
@@ -953,7 +955,9 @@ powerBtn.addEventListener("click", async () => {
       window.setTimeout(() => void requestAutomaticSubscriptionUpdate(), 700);
     }
   }
-});
+}
+
+powerBtn.addEventListener("click", () => void changeConnection("toggle"));
 
 async function runPingTest() {
   if (requestBusy || currentState !== "disconnected" || serverProfiles.length === 0) return;
@@ -1016,6 +1020,9 @@ window.vpnApi.onUpdateProgress(progress => {
     const percent = Math.min(100, Math.round(downloaded * 100 / total));
     checkUpdateBtn.textContent = `Скачиваем ${percent}%`;
   }
+});
+window.vpnApi.onTrayAction(action => {
+  if (action === "connect" || action === "disconnect") void changeConnection(action);
 });
 window.vpnApi.getState().then(applyPolledState);
 
