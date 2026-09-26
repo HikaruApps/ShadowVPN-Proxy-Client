@@ -1124,7 +1124,12 @@ button:focus { outline: none; }
 button:focus-visible { outline: 1px solid #888; outline-offset: 4px; }
 .icon-btn, .pill-btn { border-color: #252525; color: #aaa; }
 .server-card { border-radius: 12px; border-color: #1f1f1f; box-shadow: none; }
-.server-card.selected { background: #1b1b1b; border-color: #3b3b3b; box-shadow: none; }
+.server-card.selected {
+  background: linear-gradient(100deg, #242424 0%, #1c1c1c 68%, #191919 100%);
+  border-color: #4a4a4a;
+  box-shadow: inset 3px 0 0 rgba(255, 255, 255, .5), inset 0 1px 0 rgba(255, 255, 255, .06), 0 0 18px rgba(255, 255, 255, .035);
+}
+.server-card.selected:hover { background: linear-gradient(100deg, #282828 0%, #202020 68%, #1c1c1c 100%); }
 .server-icon { background: #202020; }
 .server-name { font-size: 14px; font-weight: 500; }
 .power-orb { background: radial-gradient(circle at 35% 25%, #1f1f1f, #101010 55%, #0b0b0b); box-shadow: inset 0 1px 0 #303030; border: 1px solid #252525; }
@@ -1150,7 +1155,7 @@ button:focus-visible { outline: 1px solid #888; outline-offset: 4px; }
 .icon-btn:active, .pill-btn:active { transform: scale(.93); }
 .subscription-help:active { transform: scale(.97); }
 .subscription-help { margin-top: 22px; font-size: 12px; }
-.server-card { transition: background 280ms ease, border-color 280ms ease, transform 380ms var(--motion); }
+.server-card { transition: background 280ms ease, border-color 280ms ease, box-shadow 280ms ease, transform 380ms var(--motion); }
 .server-card:active { transform: scale(.98); }
 .power-orb { transition: transform 500ms var(--motion), background 350ms ease, border-color 350ms ease, box-shadow 350ms ease; }
 .power-orb:hover { transform: scale(1.025); }

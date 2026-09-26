@@ -70,6 +70,7 @@ const styles = fs.readFileSync('src/renderer/styles.css', 'utf8');
 assert.match(styles, /grid-template-columns:\s*clamp\(320px, 45vw, 410px\)/);
 assert.match(styles, /\.server-card\s*\{[^}]*min-height:\s*56px/s);
 assert.match(styles, /\.server-card\.auto-card\s*\{[^}]*height:\s*56px/s);
+assert.match(styles, /\.server-card\.selected\s*\{[^}]*linear-gradient[^}]*border-color:\s*#4a4a4a[^}]*box-shadow:/s);
 assert.match(styles, /\.server-categories\s*\{[^}]*min-height:\s*38px[^}]*flex-shrink:\s*0/s);
 assert.match(styles, /\.server-list\s*\{[^}]*flex:\s*1 1 auto/s);
 assert.match(styles, /\.connected-location\s*\{/);
