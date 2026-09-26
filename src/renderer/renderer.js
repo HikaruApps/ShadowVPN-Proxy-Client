@@ -20,6 +20,8 @@ const settingsOverlay = document.getElementById("settingsOverlay");
 const closeSettingsBtn = document.getElementById("closeSettingsBtn");
 const dnsSelect = document.getElementById("dnsSelect");
 const dnsDescription = document.getElementById("dnsDescription");
+const subscriptionDohDescription = document.getElementById("subscriptionDohDescription");
+const useSubscriptionDohBtn = document.getElementById("useSubscriptionDohBtn");
 const customDnsFields = document.getElementById("customDnsFields");
 const customDnsInput = document.getElementById("customDnsInput");
 const customDnsError = document.getElementById("customDnsError");
@@ -582,7 +584,6 @@ function updateDNSControl() {
   const dohOption = dnsSelect.querySelector('option[value="subscription-doh"]');
   if (dohOption) {
     dohOption.disabled = !dohSource;
-    dohOption.hidden = !dohSource;
     dohOption.textContent = dohSource ? `DoH · ${dohSource.title || subscriptionStore.displayHost(dohSource.url)}` : "DoH подписки";
   }
   if (selectedDNS === "subscription-doh" && !dohSource) selectedDNS = writeDNS("cloudflare");
@@ -592,6 +593,16 @@ function updateDNSControl() {
     ? new URL(dohSource.dnsDoh).hostname
     : provider.detail;
   dnsDescription.textContent = `${provider.name} · ${providerDetail} · применяется внутри туннеля`;
+  if (dohSource) {
+    const sourceTitle = dohSource.title || subscriptionStore.displayHost(dohSource.url);
+    subscriptionDohDescription.textContent = `${subscriptionStore.displayHost(dohSource.dnsDoh)} · получен из «${sourceTitle}»`;
+  } else {
+    subscriptionDohDescription.textContent = "Текущая подписка не предоставила заголовок dns-doh";
+  }
+  useSubscriptionDohBtn.disabled = !dohSource || selectedDNS === "subscription-doh";
+  useSubscriptionDohBtn.textContent = !dohSource
+    ? "Недоступно"
+    : selectedDNS === "subscription-doh" ? "Используется" : "Использовать";
   customDnsFields.hidden = selectedDNS !== "custom";
   if (selectedDNS === "custom") {
     const validation = parseCustomDNS(customDNSValue);
@@ -1514,6 +1525,12 @@ dnsSelect.addEventListener("change", () => {
   selectedDNS = writeDNS(dnsSelect.value);
   updateDNSControl();
   if (selectedDNS === "custom") customDnsInput.focus({ preventScroll: true });
+});
+useSubscriptionDohBtn.addEventListener("click", () => {
+  const dohSource = subscriptionStore.activeItems(subscriptionState).find(item => item.dnsDoh);
+  if (!dohSource) return;
+  selectedDNS = writeDNS("subscription-doh");
+  updateDNSControl();
 });
 customDnsInput.addEventListener("input", () => {
   customDNSValue = writeCustomDNS(customDnsInput.value);

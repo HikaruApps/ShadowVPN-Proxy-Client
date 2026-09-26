@@ -217,6 +217,13 @@
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
           </span>
         </label>
+        <div class="setting-card subscription-doh-setting" id="subscriptionDohSetting">
+          <span class="setting-copy">
+            <strong>DNS-over-HTTPS</strong>
+            <small id="subscriptionDohDescription">Текущая подписка не предоставила заголовок dns-doh</small>
+          </span>
+          <button class="setting-action" id="useSubscriptionDohBtn" type="button" disabled>Недоступно</button>
+        </div>
         <div class="custom-dns" id="customDnsFields" hidden>
           <label for="customDnsInput">DNS IP-адреса</label>
           <input id="customDnsInput" type="text" maxlength="200" autocomplete="off" spellcheck="false" placeholder="Например: 1.1.1.1, 2606:4700:4700::1111" aria-describedby="customDnsError" />
