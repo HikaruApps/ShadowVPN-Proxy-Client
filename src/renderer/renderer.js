@@ -84,6 +84,7 @@ const closeSubscriptionsBtn = document.getElementById("closeSubscriptionsBtn");
 const addSubscriptionBtn = document.getElementById("addSubscriptionBtn");
 const subscriptionsList = document.getElementById("subscriptionsList");
 const subscriptionEditorForm = document.getElementById("subscriptionEditorForm");
+const subscriptionScopeOverview = document.getElementById("subscriptionScopeOverview");
 const subscriptionEditorTitle = document.getElementById("subscriptionEditorTitle");
 const subscriptionEditorHint = document.getElementById("subscriptionEditorHint");
 const managedSubscriptionUrl = document.getElementById("managedSubscriptionUrl");
@@ -114,6 +115,7 @@ const subscriptionStore = window.shadowVpnSubscriptions;
 let groupState = groupStore.readState();
 let subscriptionState = subscriptionStore.readState();
 let editingSubscriptionId = subscriptionState.selectedId;
+let addingSubscription = false;
 let editingGroupId = groupState.groups[0]?.id || "";
 let selectedDNS = readDNS();
 let customDNSValue = readCustomDNS();
@@ -1045,6 +1047,10 @@ async function requestSubscriptionList(state, trigger) {
   return normalizeImportResult(reply.result);
 }
 
+function activeSubscriptionState(state = subscriptionState) {
+  return { items: subscriptionStore.activeItems(state) };
+}
+
 async function importSubscriptionList(state, trigger) {
   const imported = await requestSubscriptionList(state, trigger);
   applyImportedProfiles(imported);
@@ -1099,7 +1105,7 @@ async function syncSubscription(trigger = "manual") {
   updatePingButton();
   statusText.textContent = trigger === "automatic" ? "Автоматически обновляем подписки…" : "Синхронизируем подписки…";
   try {
-    const imported = await importSubscriptionList(subscriptionState, trigger);
+    const imported = await importSubscriptionList(activeSubscriptionState(), trigger);
     const serverCount = serverProfiles.filter(profile => !profile.auto).length;
     const failed = failedSubscriptionCount(imported);
     statusText.textContent = `Подписки синхронизированы · ${serverCount} серверов${failed ? ` · ошибок: ${failed}` : ""}${imported.skipped ? ` · пропущено: ${imported.skipped}` : ""}`;
@@ -1125,9 +1131,20 @@ async function importSavedSubscriptions() {
   button.textContent = "Загружаем серверы…";
   subscriptionError.textContent = "";
   try {
-    const imported = await importSubscriptionList(subscriptionState, "startup");
+    let restoredAll = false;
+    let imported;
+    try {
+      imported = await importSubscriptionList(activeSubscriptionState(), "startup");
+    } catch (error) {
+      if (!subscriptionState.activeId) throw error;
+      const allSubscriptions = { ...subscriptionState, activeId: "" };
+      imported = await importSubscriptionList(activeSubscriptionState(allSubscriptions), "startup");
+      subscriptionState = subscriptionStore.writeState(allSubscriptions);
+      restoredAll = true;
+    }
     const failed = failedSubscriptionCount(imported);
-    if (failed) statusText.textContent = `Подписки загружены частично · недоступно: ${failed}`;
+    if (restoredAll) statusText.textContent = "Выбранная подписка недоступна · показаны все доступные";
+    else if (failed) statusText.textContent = `Подписки загружены частично · недоступно: ${failed}`;
     subscriptionSyncSucceeded();
     await openDashboard();
     void loadDirectIp();
@@ -1150,26 +1167,43 @@ function currentEditedSubscription() {
 function renderSubscriptionManager() {
   const edited = currentEditedSubscription();
   subscriptionsList.replaceChildren();
+
+  const allButton = document.createElement("button");
+  allButton.type = "button";
+  allButton.className = "subscription-list-item subscription-all-item";
+  allButton.classList.toggle("selected", !subscriptionState.activeId);
+  const allName = document.createElement("strong");
+  allName.textContent = "Все подписки";
+  const allDetail = document.createElement("small");
+  allDetail.textContent = `${subscriptionState.items.length} ${subscriptionState.items.length === 1 ? "источник" : "источников"} · общий список`;
+  allButton.append(allName, allDetail);
+  allButton.addEventListener("click", () => { void selectSubscriptionScope(""); });
+  subscriptionsList.append(allButton);
+
   subscriptionState.items.forEach((item, index) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "subscription-list-item";
-    button.classList.toggle("selected", item.id === editingSubscriptionId);
+    button.classList.toggle("selected", item.id === subscriptionState.activeId);
+    button.classList.toggle("editing", item.id === editingSubscriptionId);
     const name = document.createElement("strong");
     name.textContent = subscriptionStore.displayHost(item.url);
     const detail = document.createElement("small");
-    detail.textContent = `Подписка ${index + 1}`;
+    detail.textContent = `${item.id === subscriptionState.activeId ? "Только эта · " : ""}Подписка ${index + 1}`;
     button.append(name, detail);
     button.addEventListener("click", () => {
-      editingSubscriptionId = item.id;
-      subscriptionState = subscriptionStore.writeState({ ...subscriptionState, selectedId: item.id });
-      renderSubscriptionManager();
+      void selectSubscriptionScope(item.id);
     });
     subscriptionsList.append(button);
   });
 
+  const showForm = addingSubscription || Boolean(edited);
+  subscriptionEditorForm.hidden = !showForm;
+  subscriptionScopeOverview.hidden = showForm;
   subscriptionEditorTitle.textContent = edited ? subscriptionStore.displayHost(edited.url) : "Новая подписка";
-  subscriptionEditorHint.textContent = edited ? "Серверы этой подписки входят в общий список" : "Добавьте HTTPS-ссылку";
+  subscriptionEditorHint.textContent = edited
+    ? (edited.id === subscriptionState.activeId ? "В списке серверов показана только эта подписка" : "Серверы этой подписки входят в общий список")
+    : "Добавьте HTTPS-ссылку";
   managedSubscriptionUrl.value = edited?.url || "";
   managedSubscriptionUrl.removeAttribute("aria-invalid");
   managedSubscriptionError.textContent = "";
@@ -1181,10 +1215,11 @@ function renderSubscriptionManager() {
 function openSubscriptions() {
   if (requestBusy || currentState !== "disconnected") return;
   setMenuOpen(false);
-  editingSubscriptionId = subscriptionState.selectedId || subscriptionState.items[0]?.id || "";
+  addingSubscription = false;
+  editingSubscriptionId = subscriptionState.activeId || "";
   subscriptionsOverlay.hidden = false;
   renderSubscriptionManager();
-  (currentEditedSubscription() ? subscriptionsList.querySelector(".selected") : managedSubscriptionUrl)?.focus({ preventScroll: true });
+  subscriptionsList.querySelector(".selected")?.focus({ preventScroll: true });
 }
 
 async function closeSubscriptions() {
@@ -1200,6 +1235,41 @@ function setSubscriptionEditorBusy(busy) {
   saveSubscriptionBtn.disabled = busy;
   removeSubscriptionBtn.disabled = busy;
   addSubscriptionBtn.disabled = busy || subscriptionState.items.length >= subscriptionStore.maxSubscriptions;
+  for (const button of subscriptionsList.querySelectorAll("button")) button.disabled = busy;
+}
+
+async function selectSubscriptionScope(activeId) {
+  if (requestBusy || currentState !== "disconnected") return;
+  const targetId = subscriptionState.items.some(item => item.id === activeId) ? activeId : "";
+  addingSubscription = false;
+  editingSubscriptionId = targetId;
+  renderSubscriptionManager();
+  if (targetId === subscriptionState.activeId) return;
+
+  const changedState = { ...subscriptionState, activeId: targetId, selectedId: targetId || subscriptionState.selectedId };
+  requestBusy = true;
+  setSubscriptionEditorBusy(true);
+  statusText.textContent = targetId ? "Загружаем выбранную подписку…" : "Объединяем все подписки…";
+  updatePingButton();
+  try {
+    const imported = await requestSubscriptionList(activeSubscriptionState(changedState), "manual");
+    applyImportedProfiles(imported);
+    subscriptionState = subscriptionStore.writeState(changedState);
+    renderSubscriptionManager();
+    subscriptionSyncSucceeded();
+    const count = serverProfiles.filter(profile => !profile.auto).length;
+    const failed = failedSubscriptionCount(imported);
+    statusText.textContent = targetId
+      ? `Выбрана подписка · ${count} серверов`
+      : `Все подписки · ${count} серверов${failed ? ` · недоступно: ${failed}` : ""}`;
+  } catch (error) {
+    managedSubscriptionError.textContent = error.message || "Не удалось переключить подписку";
+    statusText.textContent = managedSubscriptionError.textContent;
+  } finally {
+    requestBusy = false;
+    setSubscriptionEditorBusy(false);
+    updatePingButton();
+  }
 }
 
 async function saveManagedSubscription() {
@@ -1222,12 +1292,17 @@ async function saveManagedSubscription() {
   updatePingButton();
   try {
     const changedId = edited?.id || changed.item.id;
-    const sourceIndex = changed.state.items.findIndex(item => item.id === changedId);
-    const imported = await requestSubscriptionList(changed.state, "manual");
+    const changedIsVisible = !changed.state.activeId || changed.state.activeId === changedId;
+    const requestedState = changedIsVisible
+      ? activeSubscriptionState(changed.state)
+      : { items: changed.state.items.filter(item => item.id === changedId) };
+    const sourceIndex = changed.state.activeId ? 0 : changed.state.items.findIndex(item => item.id === changedId);
+    const imported = await requestSubscriptionList(requestedState, "manual");
     const sourceError = imported.sources?.find(source => source.index === sourceIndex)?.error;
     if (sourceError) throw new Error(sourceError);
-    applyImportedProfiles(imported);
+    if (changedIsVisible) applyImportedProfiles(imported);
     subscriptionState = subscriptionStore.writeState(changed.state);
+    addingSubscription = false;
     editingSubscriptionId = changedId;
     subscriptionUrl.value = subscriptionState.items[0]?.url || "";
     renderSubscriptionManager();
@@ -1266,10 +1341,11 @@ async function removeManagedSubscription() {
   managedSubscriptionError.textContent = "Обновляем список серверов…";
   updatePingButton();
   try {
-    const imported = await requestSubscriptionList(changedState, "manual");
+    const imported = await requestSubscriptionList(activeSubscriptionState(changedState), "manual");
     applyImportedProfiles(imported);
     subscriptionState = subscriptionStore.writeState(changedState);
-    editingSubscriptionId = subscriptionState.selectedId;
+    addingSubscription = false;
+    editingSubscriptionId = subscriptionState.activeId || "";
     subscriptionUrl.value = subscriptionState.items[0].url;
     renderSubscriptionManager();
     subscriptionSyncSucceeded();
@@ -1457,6 +1533,7 @@ copyHwidBtn.addEventListener("click", async () => {
 manageSubscriptionsBtn.addEventListener("click", openSubscriptions);
 addSubscriptionBtn.addEventListener("click", () => {
   if (requestBusy || subscriptionState.items.length >= subscriptionStore.maxSubscriptions) return;
+  addingSubscription = true;
   editingSubscriptionId = "";
   renderSubscriptionManager();
   managedSubscriptionUrl.focus({ preventScroll: true });

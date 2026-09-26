@@ -29,7 +29,8 @@
       if (items.length >= maxSubscriptions) break;
     }
     const selectedId = items.some(item => item.id === value?.selectedId) ? value.selectedId : items[0]?.id || "";
-    return { items, selectedId };
+    const activeId = items.some(item => item.id === value?.activeId) ? value.activeId : "";
+    return { items, selectedId, activeId };
   }
 
   function makeId(items) {
@@ -48,10 +49,10 @@
       const legacyURL = String(storage.getItem(legacyStorageKey) || "").trim();
       if (validURL(legacyURL)) {
         const item = { id: makeId([]), url: legacyURL };
-        return { items: [item], selectedId: item.id };
+        return { items: [item], selectedId: item.id, activeId: "" };
       }
     } catch { /* Return an empty state when storage is unavailable. */ }
-    return { items: [], selectedId: "" };
+    return { items: [], selectedId: "", activeId: "" };
   }
 
   function writeState(value, storage = localStorage) {
@@ -71,7 +72,7 @@
     if (normalized.items.some(item => item.url === cleanURL)) return { state: normalized, error: "Эта подписка уже добавлена" };
     if (normalized.items.length >= maxSubscriptions) return { state: normalized, error: `Можно добавить не больше ${maxSubscriptions} подписок` };
     const item = { id: makeId(normalized.items), url: cleanURL };
-    return { state: { items: [...normalized.items, item], selectedId: item.id }, item, error: "" };
+    return { state: { items: [...normalized.items, item], selectedId: item.id, activeId: normalized.activeId }, item, error: "" };
   }
 
   function updateItem(state, id, url) {
@@ -81,7 +82,7 @@
     if (normalized.items.some(item => item.id !== id && item.url === cleanURL)) return { state: normalized, error: "Эта подписка уже добавлена" };
     if (!normalized.items.some(item => item.id === id)) return { state: normalized, error: "Подписка не найдена" };
     return {
-      state: { items: normalized.items.map(item => item.id === id ? { ...item, url: cleanURL } : item), selectedId: id },
+      state: { items: normalized.items.map(item => item.id === id ? { ...item, url: cleanURL } : item), selectedId: id, activeId: normalized.activeId },
       error: "",
     };
   }
@@ -89,7 +90,17 @@
   function removeItem(state, id) {
     const normalized = normalizeState(state);
     const items = normalized.items.filter(item => item.id !== id);
-    return { items, selectedId: items.some(item => item.id === normalized.selectedId) ? normalized.selectedId : items[0]?.id || "" };
+    return {
+      items,
+      selectedId: items.some(item => item.id === normalized.selectedId) ? normalized.selectedId : items[0]?.id || "",
+      activeId: items.some(item => item.id === normalized.activeId) ? normalized.activeId : "",
+    };
+  }
+
+  function activeItems(state) {
+    const normalized = normalizeState(state);
+    if (!normalized.activeId) return normalized.items;
+    return normalized.items.filter(item => item.id === normalized.activeId);
   }
 
   function displayHost(value) {
@@ -98,6 +109,6 @@
 
   window.shadowVpnSubscriptions = Object.freeze({
     storageKey, legacyStorageKey, maxSubscriptions, validURL, readState, writeState,
-    addItem, updateItem, removeItem, displayHost,
+    addItem, updateItem, removeItem, activeItems, displayHost,
   });
 })();

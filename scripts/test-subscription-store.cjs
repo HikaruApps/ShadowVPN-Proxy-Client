@@ -22,11 +22,23 @@ const legacy = memoryStorage({ [store.legacyStorageKey]: 'https://legacy.example
 let state = store.readState(legacy);
 assert.equal(state.items.length, 1);
 assert.equal(state.items[0].url, 'https://legacy.example/sub');
+assert.equal(state.activeId, '');
+
+const previousVersion = memoryStorage({
+  [store.storageKey]: JSON.stringify({
+    items: [{ id: 'sub-existing-1234', url: 'https://existing.example/sub' }],
+    selectedId: 'sub-existing-1234',
+  }),
+});
+assert.equal(store.readState(previousVersion).activeId, '');
 
 let result = store.addItem(state, 'https://second.example/sub');
 assert.equal(result.error, '');
 state = result.state;
 assert.equal(state.items.length, 2);
+assert.equal(store.activeItems(state).length, 2);
+state.activeId = state.items[1].id;
+assert.deepEqual([...store.activeItems(state)].map(item => item.id), [state.items[1].id]);
 assert.equal(store.addItem(state, 'https://second.example/sub').error, 'Эта подписка уже добавлена');
 result = store.updateItem(state, state.items[1].id, 'https://updated.example/sub');
 assert.equal(result.error, '');
@@ -35,6 +47,13 @@ assert.equal(state.items[1].url, 'https://updated.example/sub');
 state = store.removeItem(state, state.items[0].id);
 assert.equal(state.items.length, 1);
 assert.equal(state.selectedId, state.items[0].id);
+assert.equal(state.activeId, state.items[0].id);
+
+state = store.removeItem(state, state.items[0].id);
+assert.equal(state.activeId, '');
+
+result = store.addItem(state, 'https://updated.example/sub');
+state = result.state;
 
 const storage = memoryStorage();
 state = store.writeState(state, storage);

@@ -62,7 +62,7 @@
               <span class="menu-item-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="M7 7h12v12H7z"/><path d="M5 16H3V3h13v2"/></svg>
               </span>
-              <span class="menu-item-copy"><strong>Управление подписками</strong><small>Добавить, изменить или удалить</small></span>
+              <span class="menu-item-copy"><strong>Управление подписками</strong><small>Выбор списка и настройка ссылок</small></span>
             </button>
           </div>
         </div>
@@ -358,6 +358,11 @@
           <div class="subscriptions-list" id="subscriptionsList"></div>
         </aside>
         <div class="subscription-editor">
+          <div class="subscription-scope-overview" id="subscriptionScopeOverview" hidden>
+            <strong>Все подписки</strong>
+            <p>Серверы из всех доступных подписок объединены в одном списке.</p>
+            <small>Чтобы изменить ссылку или показать серверы только одной подписки, выберите её слева.</small>
+          </div>
           <form id="subscriptionEditorForm" novalidate>
             <div class="subscription-editor-heading">
               <strong id="subscriptionEditorTitle">Новая подписка</strong>
@@ -373,7 +378,7 @@
           </form>
         </div>
       </div>
-      <p class="subscriptions-note">Можно добавить до 16 подписок. Серверы объединяются в одном списке.</p>
+      <p class="subscriptions-note">Выберите все подписки или один источник. Можно добавить до 16 ссылок.</p>
     </section>
   </div>
 
