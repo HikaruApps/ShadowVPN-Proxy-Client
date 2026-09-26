@@ -20,15 +20,17 @@ if (-not (Test-Path -LiteralPath $signaturePath)) { throw "Updater signature not
 $signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
 if (-not $signature) { throw 'Updater signature is empty.' }
 $downloadUrl = "https://github.com/HikaruApps/ShadowVPN-Proxy-Client/releases/download/v$Version/$installerName"
+$platform = [ordered]@{
+    signature = $signature
+    url = $downloadUrl
+}
 $manifest = [ordered]@{
     version = $Version
     notes = "ShadowVPN Desktop v$Version"
     pub_date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     platforms = [ordered]@{
-        'windows-x86_64-nsis' = [ordered]@{
-            signature = $signature
-            url = $downloadUrl
-        }
+        'windows-x86_64-nsis' = $platform
+        'windows-x86_64' = $platform
     }
 }
 
