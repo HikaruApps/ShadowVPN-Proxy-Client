@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use serde_json::{json, Value};
 use shadowvpn::backend::Backend;
-use shadowvpn::settings::validate_dns_request;
+use shadowvpn::settings::{valid_https_endpoint, validate_dns_request};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -85,10 +85,33 @@ async fn vpn_import_many(
     call(&service, "importMany", json!({"urls":urls,"reason":reason})).await
 }
 #[tauri::command]
+fn vpn_open_url(url: String) -> Result<(), String> {
+    if !valid_https_endpoint(&url, true) {
+        return Err("Некорректная HTTPS-ссылка".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|_| "Не удалось открыть ссылку".to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = url;
+        Err("Открытие ссылок поддерживается только в Windows".into())
+    }
+}
+#[tauri::command]
 async fn vpn_connect(
     profile_id: String,
     dns: Option<String>,
     dns_servers: Option<Vec<String>>,
+    dns_doh: Option<String>,
     fragmentation: Option<bool>,
     kill_switch: Option<bool>,
     auto_profile_ids: Option<Vec<String>>,
@@ -133,11 +156,11 @@ async fn vpn_connect(
     {
         return Err("Группу можно использовать только с Auto".into());
     }
-    let (dns, dns_servers) = validate_dns_request(dns, dns_servers)?;
+    let (dns, dns_servers, dns_doh) = validate_dns_request(dns, dns_servers, dns_doh)?;
     call(
         &service,
         "connect",
-        json!({"profileId":profile_id,"dns":dns,"dnsServers":dns_servers,"fragmentation":fragmentation.unwrap_or(false),"killSwitch":kill_switch.unwrap_or(false),"autoProfileIds":auto_profile_ids,"routeMode":route_mode,"directDomains":direct_domains,"geoIpUrl":geo_ip_url,"geoSiteUrl":geo_site_url}),
+        json!({"profileId":profile_id,"dns":dns,"dnsServers":dns_servers,"dnsDoh":dns_doh,"fragmentation":fragmentation.unwrap_or(false),"killSwitch":kill_switch.unwrap_or(false),"autoProfileIds":auto_profile_ids,"routeMode":route_mode,"directDomains":direct_domains,"geoIpUrl":geo_ip_url,"geoSiteUrl":geo_site_url}),
     )
     .await
 }
@@ -309,6 +332,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             vpn_import,
             vpn_import_many,
+            vpn_open_url,
             vpn_connect,
             vpn_disconnect,
             vpn_ping,

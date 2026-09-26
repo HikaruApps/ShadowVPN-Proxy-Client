@@ -3,12 +3,14 @@ package main
 import (
 	"errors"
 	"net/netip"
+	"net/url"
 	"strings"
 )
 
 type dnsPreset struct {
 	Name    string
 	Servers []string
+	DoHURL  string
 }
 
 var dnsPresets = map[string]dnsPreset{
@@ -18,6 +20,10 @@ var dnsPresets = map[string]dnsPreset{
 }
 
 func selectedDNS(value string, customServers []string) (string, dnsPreset, error) {
+	return selectedDNSWithDoH(value, customServers, "")
+}
+
+func selectedDNSWithDoH(value string, customServers []string, dohURL string) (string, dnsPreset, error) {
 	id := strings.ToLower(strings.TrimSpace(value))
 	if id == "" {
 		id = "cloudflare"
@@ -29,11 +35,32 @@ func selectedDNS(value string, customServers []string) (string, dnsPreset, error
 		}
 		return id, dnsPreset{Name: "Пользовательский DNS", Servers: servers}, nil
 	}
+	if id == "subscription-doh" {
+		normalized, err := validatedDoHURL(dohURL)
+		if err != nil {
+			return "", dnsPreset{}, err
+		}
+		return id, dnsPreset{Name: "DoH подписки", Servers: []string{"1.1.1.1"}, DoHURL: normalized}, nil
+	}
 	preset, ok := dnsPresets[id]
 	if !ok {
 		return "", dnsPreset{}, errors.New("Выбран неизвестный DNS-сервер")
 	}
 	return id, preset, nil
+}
+
+func validatedDoHURL(value string) (string, error) {
+	if len(value) == 0 || len(value) > 2048 || strings.TrimSpace(value) != value {
+		return "", errors.New("Подписка не предоставила корректный DoH-адрес")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" || parsed.RawQuery != "" {
+		return "", errors.New("DoH должен использовать корректный HTTPS-адрес")
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		parsed.Path = "/dns-query"
+	}
+	return parsed.String(), nil
 }
 
 func validatedCustomDNS(values []string) ([]string, error) {

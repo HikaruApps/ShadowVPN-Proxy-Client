@@ -371,6 +371,10 @@
             <label for="managedSubscriptionUrl">Ссылка на подписку</label>
             <input id="managedSubscriptionUrl" type="url" placeholder="https://cloud.example.com/…" autocomplete="off" spellcheck="false" aria-describedby="managedSubscriptionError" />
             <p class="subscription-editor-error" id="managedSubscriptionError" role="alert"></p>
+            <div class="subscription-metadata" id="subscriptionMetadata" hidden>
+              <button id="subscriptionSupportBtn" type="button" hidden>Открыть поддержку</button>
+              <span id="subscriptionDohInfo" hidden></span>
+            </div>
             <div class="subscription-editor-actions">
               <button class="subscription-remove" id="removeSubscriptionBtn" type="button">Удалить</button>
               <button class="subscription-save" id="saveSubscriptionBtn" type="submit">Добавить подписку</button>

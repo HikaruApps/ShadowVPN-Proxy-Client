@@ -29,7 +29,8 @@
   window.vpnApi = Object.freeze({
     importSubscription: (url, reason = 'manual') => call('vpn_import', { url, reason }),
     importSubscriptions: (urls, reason = 'manual') => call('vpn_import_many', { urls, reason }),
-    connect: (profileId, dns = 'cloudflare', dnsServers = [], fragmentation = false, killSwitch = false, autoProfileIds = [], routeMode = 'full', directDomains = [], geoIpUrl = '', geoSiteUrl = '') => call('vpn_connect', { profileId, dns, dnsServers, fragmentation, killSwitch, autoProfileIds, routeMode, directDomains, geoIpUrl, geoSiteUrl }),
+    openExternalURL: url => call('vpn_open_url', { url }),
+    connect: (profileId, dns = 'cloudflare', dnsServers = [], fragmentation = false, killSwitch = false, autoProfileIds = [], routeMode = 'full', directDomains = [], geoIpUrl = '', geoSiteUrl = '', dnsDoh = '') => call('vpn_connect', { profileId, dns, dnsServers, fragmentation, killSwitch, autoProfileIds, routeMode, directDomains, geoIpUrl, geoSiteUrl, dnsDoh }),
     disconnect: () => call('vpn_disconnect'),
     ping: (pingMethod = 'tcp') => call('vpn_ping', { pingMethod }),
     publicIp: (masked = false) => call('vpn_public_ip', { masked }),

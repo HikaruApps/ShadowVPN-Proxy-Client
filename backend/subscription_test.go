@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -17,6 +18,24 @@ import (
 )
 
 const sample = "vless://00000000-0000-4000-8000-000000000001@example.com:443?security=tls&sni=example.com&type=xhttp&path=%2Fapi&mode=stream-up#Poland"
+
+func TestSubscriptionMetadataHeaders(t *testing.T) {
+	header := make(http.Header)
+	header.Set("profile-title", "base64:"+base64.StdEncoding.EncodeToString([]byte("ShadowVPN Основная")))
+	header.Set("support-url", "https://t.me/ShadowVpnSupport_bot?start=client")
+	header.Set("dns-doh", "dns.shadowvpn.io")
+	metadata := subscriptionMetadataFromHeaders(header)
+	if metadata.Title != "ShadowVPN Основная" || metadata.SupportURL != "https://t.me/ShadowVpnSupport_bot?start=client" || metadata.DNSDoH != "https://dns.shadowvpn.io/dns-query" {
+		t.Fatalf("unexpected subscription metadata: %#v", metadata)
+	}
+	header.Set("profile-title", "rwEncodeBase64:ShadowVPN")
+	header.Set("support-url", "javascript:alert(1)")
+	header.Set("dns-doh", "http://dns.example/dns-query")
+	metadata = subscriptionMetadataFromHeaders(header)
+	if metadata.Title != "ShadowVPN" || metadata.SupportURL != "" || metadata.DNSDoH != "" {
+		t.Fatalf("unsafe metadata was accepted: %#v", metadata)
+	}
+}
 
 func TestSubscriptionFormats(t *testing.T) {
 	for _, raw := range []string{sample, base64.StdEncoding.EncodeToString([]byte(sample)), base64.RawURLEncoding.EncodeToString([]byte(sample))} {

@@ -34,6 +34,7 @@ type request struct {
 	ProfileID      string   `json:"profileId"`
 	DNS            string   `json:"dns"`
 	DNSServers     []string `json:"dnsServers"`
+	DNSDoH         string   `json:"dnsDoh"`
 	Fragment       bool     `json:"fragmentation"`
 	KillSwitch     bool     `json:"killSwitch"`
 	AutoProfileIDs []string `json:"autoProfileIds"`
@@ -213,9 +214,9 @@ func profilesByID(profiles []Profile, ids []string) []Profile {
 	return result
 }
 
-func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoProfileIDs, directDomains []string, routeMode, geoIPURL, geoSiteURL string, fragmentation, killSwitch bool) error {
+func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoProfileIDs, directDomains []string, dnsDoH, routeMode, geoIPURL, geoSiteURL string, fragmentation, killSwitch bool) error {
 	w.logf("connect requested profile_id=%s", id)
-	validatedDNSID, dns, err := selectedDNS(dnsID, customDNS)
+	validatedDNSID, dns, err := selectedDNSWithDoH(dnsID, customDNS, dnsDoH)
 	if err != nil {
 		w.logf("connect rejected: invalid DNS preset")
 		return err
@@ -363,9 +364,9 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 	w.logf("creating Xray TUN configuration with pre-resolved endpoint=%s", bootstrap.SelectedAddress)
 	var config []byte
 	if isAuto {
-		config, e = makeAutoConfigWithRoutingOptions(autoProfiles, validatedDNSID, dns.Servers, fragmentation, outboundInterface, routing)
+		config, e = makeAutoConfigWithRoutingAndDoH(autoProfiles, validatedDNSID, dns.Servers, dns.DoHURL, fragmentation, outboundInterface, routing)
 	} else {
-		config, e = makeConfigWithRoutingOptions(resolved, validatedDNSID, dns.Servers, fragmentation, outboundInterface, routing)
+		config, e = makeConfigWithRoutingAndDoH(resolved, validatedDNSID, dns.Servers, dns.DoHURL, fragmentation, outboundInterface, routing)
 	}
 	if e != nil {
 		w.logf("configuration generation failed: %v", e)
@@ -514,10 +515,11 @@ func main() {
 				} else {
 					var ps []Profile
 					var skipped int
-					ps, skipped, err = fetchSubscription(ctx, r.URL)
+					var metadata subscriptionMetadata
+					ps, skipped, metadata, err = fetchSubscription(ctx, r.URL)
 					if err == nil {
 						w.profiles = ps
-						result = map[string]any{"profiles": profilesForRenderer(ps), "skipped": skipped}
+						result = map[string]any{"profiles": profilesForRenderer(ps), "skipped": skipped, "metadata": metadata}
 						w.logf("subscription sync completed profiles=%d skipped_unsupported=%d", len(ps), skipped)
 					} else {
 						w.logf("subscription sync failed: %v", err)
@@ -553,7 +555,7 @@ func main() {
 					}
 				}
 			case "connect":
-				err = w.connect(ctx, r.ProfileID, r.DNS, r.DNSServers, r.AutoProfileIDs, r.DirectDomains, r.RouteMode, r.GeoIPURL, r.GeoSiteURL, r.Fragment, r.KillSwitch)
+				err = w.connect(ctx, r.ProfileID, r.DNS, r.DNSServers, r.AutoProfileIDs, r.DirectDomains, r.DNSDoH, r.RouteMode, r.GeoIPURL, r.GeoSiteURL, r.Fragment, r.KillSwitch)
 				if err == nil {
 					result = w.currentActiveProfile()
 				}

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type Profile struct {
@@ -62,10 +63,92 @@ func decodeBase64(s string) ([]byte, error) {
 	}
 	return nil, errors.New("Некорректный Base64")
 }
-func fetchSubscription(ctx context.Context, address string) ([]Profile, int, error) {
+
+type subscriptionMetadata struct {
+	Title      string `json:"title,omitempty"`
+	SupportURL string `json:"supportUrl,omitempty"`
+	DNSDoH     string `json:"dnsDoh,omitempty"`
+}
+
+func cleanHeaderText(value string, maxLength int) string {
+	value = strings.TrimSpace(strings.ToValidUTF8(value, ""))
+	value = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, value)
+	if len(value) > maxLength {
+		value = value[:maxLength]
+		for !utf8.ValidString(value) {
+			value = value[:len(value)-1]
+		}
+	}
+	return strings.TrimSpace(value)
+}
+
+func decodeProfileTitle(value string) string {
+	value = cleanHeaderText(value, 1024)
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) != 2 {
+		return cleanHeaderText(value, 120)
+	}
+	prefix, payload := strings.ToLower(strings.TrimSpace(parts[0])), strings.TrimSpace(parts[1])
+	switch prefix {
+	case "base64":
+		if decoded, err := decodeBase64(payload); err == nil && utf8.Valid(decoded) {
+			return cleanHeaderText(string(decoded), 120)
+		}
+	case "rwencodebase64":
+		if decoded, err := decodeBase64(payload); err == nil && utf8.Valid(decoded) {
+			return cleanHeaderText(string(decoded), 120)
+		}
+		return cleanHeaderText(payload, 120)
+	case "urlencoded", "urlencode":
+		if decoded, err := url.QueryUnescape(payload); err == nil {
+			return cleanHeaderText(decoded, 120)
+		}
+	}
+	return cleanHeaderText(value, 120)
+}
+
+func normalizedHTTPSURL(value string, defaultPath string, allowQuery bool) string {
+	value = strings.TrimSpace(strings.ToValidUTF8(value, ""))
+	if len(value) > 2048 {
+		return ""
+	}
+	value = cleanHeaderText(value, 2048)
+	if value == "" {
+		return ""
+	}
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
+		return ""
+	}
+	if defaultPath != "" && (parsed.Path == "" || parsed.Path == "/") {
+		parsed.Path = defaultPath
+	}
+	if !allowQuery && parsed.RawQuery != "" {
+		return ""
+	}
+	return parsed.String()
+}
+
+func subscriptionMetadataFromHeaders(header http.Header) subscriptionMetadata {
+	return subscriptionMetadata{
+		Title:      decodeProfileTitle(header.Get("profile-title")),
+		SupportURL: normalizedHTTPSURL(header.Get("support-url"), "", true),
+		DNSDoH:     normalizedHTTPSURL(header.Get("dns-doh"), "/dns-query", false),
+	}
+}
+
+func fetchSubscription(ctx context.Context, address string) ([]Profile, int, subscriptionMetadata, error) {
 	u, e := url.Parse(address)
 	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
-		return nil, 0, errors.New("Нужна HTTPS-ссылка на подписку")
+		return nil, 0, subscriptionMetadata{}, errors.New("Нужна HTTPS-ссылка на подписку")
 	}
 	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 		if len(via) >= 5 || r.URL.Scheme != "https" || r.URL.User != nil {
@@ -75,41 +158,44 @@ func fetchSubscription(ctx context.Context, address string) ([]Profile, int, err
 	}}
 	req, e := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if e != nil {
-		return nil, 0, errors.New("Некорректная ссылка")
+		return nil, 0, subscriptionMetadata{}, errors.New("Некорректная ссылка")
 	}
 	setClientIdentityHeaders(req, currentDeviceInfo())
 	req.Header.Set("Accept", "application/json, text/plain;q=0.9")
 	resp, e := client.Do(req)
 	if e != nil {
-		return nil, 0, errors.New("Не удалось загрузить подписку. Проверьте интернет и ссылку")
+		return nil, 0, subscriptionMetadata{}, errors.New("Не удалось загрузить подписку. Проверьте интернет и ссылку")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, 0, fmt.Errorf("Сервер подписки вернул HTTP %d", resp.StatusCode)
+		return nil, 0, subscriptionMetadata{}, fmt.Errorf("Сервер подписки вернул HTTP %d", resp.StatusCode)
 	}
+	metadata := subscriptionMetadataFromHeaders(resp.Header)
 	b, e := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
 	if e != nil {
-		return nil, 0, errors.New("Ошибка чтения подписки")
+		return nil, 0, metadata, errors.New("Ошибка чтения подписки")
 	}
 	if len(b) > 4*1024*1024 {
-		return nil, 0, errors.New("Подписка превышает 4 МБ")
+		return nil, 0, metadata, errors.New("Подписка превышает 4 МБ")
 	}
 	skipped := 0
 	profiles, err := parseSubscriptionWithStats(b, &skipped)
-	return profiles, skipped, err
+	return profiles, skipped, metadata, err
 }
 
 type subscriptionSourceStatus struct {
-	Index    int    `json:"index"`
-	Profiles int    `json:"profiles"`
-	Skipped  int    `json:"skipped"`
-	Error    string `json:"error,omitempty"`
+	Index    int                  `json:"index"`
+	Profiles int                  `json:"profiles"`
+	Skipped  int                  `json:"skipped"`
+	Metadata subscriptionMetadata `json:"metadata"`
+	Error    string               `json:"error,omitempty"`
 }
 
 type subscriptionFetchResult struct {
 	index    int
 	profiles []Profile
 	skipped  int
+	metadata subscriptionMetadata
 	err      error
 }
 
@@ -135,8 +221,8 @@ func fetchSubscriptions(ctx context.Context, addresses []string) ([]Profile, []s
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			profiles, skipped, err := fetchSubscription(ctx, address)
-			results[index] = subscriptionFetchResult{index: index, profiles: profiles, skipped: skipped, err: err}
+			profiles, skipped, metadata, err := fetchSubscription(ctx, address)
+			results[index] = subscriptionFetchResult{index: index, profiles: profiles, skipped: skipped, metadata: metadata, err: err}
 		}()
 	}
 	wait.Wait()
@@ -147,7 +233,7 @@ func fetchSubscriptions(ctx context.Context, addresses []string) ([]Profile, []s
 	successful := 0
 	firstError := ""
 	for _, result := range results {
-		status := subscriptionSourceStatus{Index: result.index, Profiles: len(result.profiles), Skipped: result.skipped}
+		status := subscriptionSourceStatus{Index: result.index, Profiles: len(result.profiles), Skipped: result.skipped, Metadata: result.metadata}
 		if result.err != nil {
 			status.Error = result.err.Error()
 			if firstError == "" {
@@ -578,7 +664,11 @@ func attachGeoDataConfig(config map[string]any, routing routingOptions) {
 }
 
 func makeConfigWithRoutingOptions(p Profile, dnsID string, customServers []string, fragmentation bool, outboundInterface string, routing routingOptions) ([]byte, error) {
-	_, dns, err := selectedDNS(dnsID, customServers)
+	return makeConfigWithRoutingAndDoH(p, dnsID, customServers, "", fragmentation, outboundInterface, routing)
+}
+
+func makeConfigWithRoutingAndDoH(p Profile, dnsID string, customServers []string, dohURL string, fragmentation bool, outboundInterface string, routing routingOptions) ([]byte, error) {
+	_, dns, err := selectedDNSWithDoH(dnsID, customServers, dohURL)
 	if err != nil {
 		return nil, err
 	}
@@ -594,10 +684,14 @@ func makeAutoConfigWithOptions(profiles []Profile, dnsID string, customServers [
 }
 
 func makeAutoConfigWithRoutingOptions(profiles []Profile, dnsID string, customServers []string, fragmentation bool, outboundInterface string, routing routingOptions) ([]byte, error) {
+	return makeAutoConfigWithRoutingAndDoH(profiles, dnsID, customServers, "", fragmentation, outboundInterface, routing)
+}
+
+func makeAutoConfigWithRoutingAndDoH(profiles []Profile, dnsID string, customServers []string, dohURL string, fragmentation bool, outboundInterface string, routing routingOptions) ([]byte, error) {
 	if len(profiles) == 0 {
 		return nil, errors.New("для Auto не переданы серверы")
 	}
-	_, dns, err := selectedDNS(dnsID, customServers)
+	_, dns, err := selectedDNSWithDoH(dnsID, customServers, dohURL)
 	if err != nil {
 		return nil, err
 	}
@@ -617,7 +711,7 @@ func makeAutoConfigWithRoutingOptions(profiles []Profile, dnsID string, customSe
 		"probeInterval":     autoProbeInterval,
 		"enableConcurrency": true,
 	}
-	rules := []any{}
+	rules := dnsRoutingRules(dns)
 	if routing.Mode == "bypass" {
 		rules = append(rules, routingSelectionRules(routing, "outboundTag", "direct")...)
 	} else if routing.Mode == "proxy_only" {
@@ -678,9 +772,12 @@ func runtimeConfigWithRouting(outbounds []any, dns dnsPreset, outboundInterface 
 	}
 	// Keep a direct outbound available for domain split-routing. It is harmless
 	// when the default full-VPN mode is selected because no rule points to it.
-	runtimeOutbounds := make([]any, 0, len(outbounds)+1)
+	runtimeOutbounds := make([]any, 0, len(outbounds)+2)
 	runtimeOutbounds = append(runtimeOutbounds, outbounds...)
 	runtimeOutbounds = append(runtimeOutbounds, map[string]any{"tag": "direct", "protocol": "freedom", "settings": map[string]any{}})
+	if dns.DoHURL != "" {
+		runtimeOutbounds = append(runtimeOutbounds, map[string]any{"tag": "dns-out", "protocol": "dns", "settings": map[string]any{}})
+	}
 	config := map[string]any{
 		"log":       map[string]any{"loglevel": "debug"},
 		"inbounds":  []any{map[string]any{"tag": "tun-in", "protocol": "tun", "sniffing": map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}}, "settings": map[string]any{"name": "ShadowVPN", "desc": "ShadowVPN", "mtu": 1500, "gateway": []string{"172.31.255.1/30", "fd31:ffff::1/126"}, "dns": dns.Servers, "autoSystemRoutingTable": []string{"0.0.0.0/0", "::/0"}, "autoOutboundsInterface": outboundInterface}}},
@@ -691,18 +788,36 @@ func runtimeConfigWithRouting(outbounds []any, dns dnsPreset, outboundInterface 
 		}},
 		"stats": map[string]any{},
 	}
+	if dns.DoHURL != "" {
+		config["dns"] = map[string]any{"servers": []string{dns.DoHURL}, "queryStrategy": "UseIP"}
+	}
+	rules := dnsRoutingRules(dns)
 	if routing.Mode != "full" && (len(routing.DirectDomains) > 0 || len(routing.IPRules) > 0) {
-		rules := []any{}
 		if routing.Mode == "proxy_only" {
 			rules = append(rules, routingSelectionRules(routing, "outboundTag", "proxy")...)
 			rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "outboundTag": "direct"})
 		} else {
 			rules = append(rules, routingSelectionRules(routing, "outboundTag", "direct")...)
 		}
+	}
+	if len(rules) > 0 {
 		config["routing"] = map[string]any{"domainStrategy": "IPIfNonMatch", "rules": rules}
 	}
 	attachGeoDataConfig(config, routing)
 	return config
+}
+
+func dnsRoutingRules(dns dnsPreset) []any {
+	if dns.DoHURL == "" {
+		return []any{}
+	}
+	return []any{map[string]any{
+		"type":        "field",
+		"inboundTag":  []string{"tun-in"},
+		"network":     "tcp,udp",
+		"port":        "53",
+		"outboundTag": "dns-out",
+	}}
 }
 
 func marshalRuntimeConfig(outbounds []any, dns dnsPreset, outboundInterface string) ([]byte, error) {

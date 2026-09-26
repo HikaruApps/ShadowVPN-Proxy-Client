@@ -17,6 +17,9 @@ const store = window.shadowVpnSubscriptions;
 assert.equal(store.validURL('https://example.com/sub'), true);
 assert.equal(store.validURL('http://example.com/sub'), false);
 assert.equal(store.validURL('https://user@example.com/sub'), false);
+assert.deepEqual(JSON.parse(JSON.stringify(store.cleanMetadata({ title: ' ShadowVPN\n', supportUrl: 'https://t.me/support', dnsDoh: 'dns.example' }))), {
+  title: 'ShadowVPN', supportUrl: 'https://t.me/support', dnsDoh: 'https://dns.example/dns-query',
+});
 
 const legacy = memoryStorage({ [store.legacyStorageKey]: 'https://legacy.example/sub' });
 let state = store.readState(legacy);
@@ -39,6 +42,10 @@ assert.equal(state.items.length, 2);
 assert.equal(store.activeItems(state).length, 2);
 state.activeId = state.items[1].id;
 assert.deepEqual([...store.activeItems(state)].map(item => item.id), [state.items[1].id]);
+state = store.updateMetadata(state, state.items[1].id, { title: 'Основная', supportUrl: 'javascript:alert(1)', dnsDoh: 'http://dns.example' });
+assert.equal(state.items[1].title, 'Основная');
+assert.equal(state.items[1].supportUrl, '');
+assert.equal(state.items[1].dnsDoh, '');
 assert.equal(store.addItem(state, 'https://second.example/sub').error, 'Эта подписка уже добавлена');
 result = store.updateItem(state, state.items[1].id, 'https://updated.example/sub');
 assert.equal(result.error, '');

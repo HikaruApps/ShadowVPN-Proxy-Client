@@ -79,6 +79,35 @@ func TestConfigUsesCustomDNS(t *testing.T) {
 	}
 }
 
+func TestSubscriptionDoHValidationAndConfig(t *testing.T) {
+	id, preset, err := selectedDNSWithDoH("subscription-doh", nil, "https://dns.shadowvpn.io/dns-query")
+	if err != nil || id != "subscription-doh" || preset.DoHURL != "https://dns.shadowvpn.io/dns-query" {
+		t.Fatalf("subscription DoH validation failed: id=%q preset=%#v err=%v", id, preset, err)
+	}
+	for _, value := range []string{"", "http://dns.example/dns-query", "https://user@dns.example/dns-query", "https://dns.example/dns-query?token=secret"} {
+		if _, _, err := selectedDNSWithDoH("subscription-doh", nil, value); err == nil {
+			t.Fatalf("invalid DoH URL accepted: %q", value)
+		}
+	}
+	profile, err := parseURI(sample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := makeConfigWithRoutingAndDoH(profile, "subscription-doh", nil, preset.DoHURL, false, "auto", routingOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := string(config)
+	for _, expected := range []string{`"dns-out"`, `"protocol":"dns"`, `"https://dns.shadowvpn.io/dns-query"`, `"port":"53"`} {
+		if !strings.Contains(value, expected) {
+			t.Fatalf("DoH config field %s missing: %s", expected, value)
+		}
+	}
+	if _, err = core.LoadConfig("json", bytes.NewReader(config)); err != nil {
+		t.Fatalf("Xray rejected DoH config: %v", err)
+	}
+}
+
 func TestConfigUsesNativeTLSHelloFragmentation(t *testing.T) {
 	profile, err := parseURI(sample)
 	if err != nil {

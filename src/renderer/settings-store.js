@@ -27,6 +27,7 @@
     Object.freeze({ id: "cloudflare", name: "Cloudflare", detail: "1.1.1.1" }),
     Object.freeze({ id: "google", name: "Google", detail: "8.8.8.8" }),
     Object.freeze({ id: "quad9", name: "Quad9", detail: "с блокировкой угроз" }),
+    Object.freeze({ id: "subscription-doh", name: "DoH подписки", detail: "из заголовка dns-doh" }),
     Object.freeze({ id: "custom", name: "Свой DNS", detail: "IPv4 или IPv6" }),
   ]);
 

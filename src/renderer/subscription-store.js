@@ -10,12 +10,36 @@
     } catch { return false; }
   }
 
+  function cleanTitle(value) {
+    return String(value || "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 120);
+  }
+
+  function cleanHTTPSURL(value, defaultPath = "", allowQuery = true) {
+    try {
+      let raw = String(value || "").trim();
+      if (!raw) return "";
+      if (!raw.includes("://")) raw = `https://${raw}`;
+      const parsed = new URL(raw);
+      if (parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password || parsed.hash || (!allowQuery && parsed.search)) return "";
+      if (defaultPath && (!parsed.pathname || parsed.pathname === "/")) parsed.pathname = defaultPath;
+      return parsed.href.length <= 2048 ? parsed.href : "";
+    } catch { return ""; }
+  }
+
+  function cleanMetadata(value) {
+    return {
+      title: cleanTitle(value?.title),
+      supportUrl: cleanHTTPSURL(value?.supportUrl),
+      dnsDoh: cleanHTTPSURL(value?.dnsDoh, "/dns-query", false),
+    };
+  }
+
   function cleanItem(value) {
     if (!value || typeof value !== "object") return null;
     const id = String(value.id || "");
     const url = String(value.url || "").trim();
     if (!/^sub-[0-9a-z-]{8,}$/i.test(id) || !validURL(url)) return null;
-    return { id, url };
+    return { id, url, ...cleanMetadata(value) };
   }
 
   function normalizeState(value) {
@@ -97,6 +121,15 @@
     };
   }
 
+  function updateMetadata(state, id, metadata) {
+    const normalized = normalizeState(state);
+    const clean = cleanMetadata(metadata);
+    return {
+      ...normalized,
+      items: normalized.items.map(item => item.id === id ? { ...item, ...clean } : item),
+    };
+  }
+
   function activeItems(state) {
     const normalized = normalizeState(state);
     if (!normalized.activeId) return normalized.items;
@@ -109,6 +142,6 @@
 
   window.shadowVpnSubscriptions = Object.freeze({
     storageKey, legacyStorageKey, maxSubscriptions, validURL, readState, writeState,
-    addItem, updateItem, removeItem, activeItems, displayHost,
+    addItem, updateItem, removeItem, updateMetadata, activeItems, cleanMetadata, displayHost,
   });
 })();

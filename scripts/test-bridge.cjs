@@ -44,12 +44,16 @@ vm.runInNewContext(fs.readFileSync('src/renderer/tauri-bridge.js', 'utf8'), { wi
   await window.vpnApi.connect('abcdef', 'cloudflare', [], false, false, [], 'bypass', ['geosite:youtube', 'geoip:ru'], 'https://example.com/geoip.dat', 'https://example.com/geosite.dat');
   assert.equal(calls.at(-1)[1].geoIpUrl, 'https://example.com/geoip.dat');
   assert.equal(calls.at(-1)[1].geoSiteUrl, 'https://example.com/geosite.dat');
+  await window.vpnApi.connect('abcdef', 'subscription-doh', [], false, false, [], 'full', [], '', '', 'https://dns.example/dns-query');
+  assert.equal(calls.at(-1)[1].dnsDoh, 'https://dns.example/dns-query');
   assert.equal((await window.vpnApi.importSubscription('https://example.com', 'automatic')).error, 'Import failed');
   assert.equal(calls.at(-1)[1].reason, 'automatic');
   await window.vpnApi.importSubscriptions(['https://one.example', 'https://two.example'], 'startup');
   assert.equal(calls.at(-1)[0], 'vpn_import_many');
   assert.deepEqual([...calls.at(-1)[1].urls], ['https://one.example', 'https://two.example']);
   assert.equal(calls.at(-1)[1].reason, 'startup');
+  await window.vpnApi.openExternalURL('https://t.me/support');
+  assert.equal(calls.at(-1)[0], 'vpn_open_url');
   await window.vpnApi.disconnect(); assert.equal(calls.at(-1)[0], 'vpn_disconnect');
   await window.vpnApi.ping('head'); assert.equal(calls.at(-1)[0], 'vpn_ping'); assert.equal(calls.at(-1)[1].pingMethod, 'head');
   await window.vpnApi.publicIp(true); assert.equal(calls.at(-1)[0], 'vpn_public_ip'); assert.equal(calls.at(-1)[1].masked, true);

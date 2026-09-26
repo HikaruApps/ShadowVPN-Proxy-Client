@@ -89,6 +89,9 @@ const subscriptionEditorTitle = document.getElementById("subscriptionEditorTitle
 const subscriptionEditorHint = document.getElementById("subscriptionEditorHint");
 const managedSubscriptionUrl = document.getElementById("managedSubscriptionUrl");
 const managedSubscriptionError = document.getElementById("managedSubscriptionError");
+const subscriptionMetadata = document.getElementById("subscriptionMetadata");
+const subscriptionSupportBtn = document.getElementById("subscriptionSupportBtn");
+const subscriptionDohInfo = document.getElementById("subscriptionDohInfo");
 const removeSubscriptionBtn = document.getElementById("removeSubscriptionBtn");
 const saveSubscriptionBtn = document.getElementById("saveSubscriptionBtn");
 
@@ -575,9 +578,20 @@ async function closeLogs() {
 }
 
 function updateDNSControl() {
+  const dohSource = subscriptionStore.activeItems(subscriptionState).find(item => item.dnsDoh);
+  const dohOption = dnsSelect.querySelector('option[value="subscription-doh"]');
+  if (dohOption) {
+    dohOption.disabled = !dohSource;
+    dohOption.hidden = !dohSource;
+    dohOption.textContent = dohSource ? `DoH · ${dohSource.title || subscriptionStore.displayHost(dohSource.url)}` : "DoH подписки";
+  }
+  if (selectedDNS === "subscription-doh" && !dohSource) selectedDNS = writeDNS("cloudflare");
   dnsSelect.value = selectedDNS;
   const provider = dnsProviders.find(item => item.id === selectedDNS) || dnsProviders[0];
-  dnsDescription.textContent = `${provider.name} · ${provider.detail} · применяется внутри туннеля`;
+  const providerDetail = selectedDNS === "subscription-doh" && dohSource
+    ? new URL(dohSource.dnsDoh).hostname
+    : provider.detail;
+  dnsDescription.textContent = `${provider.name} · ${providerDetail} · применяется внутри туннеля`;
   customDnsFields.hidden = selectedDNS !== "custom";
   if (selectedDNS === "custom") {
     const validation = parseCustomDNS(customDNSValue);
@@ -833,6 +847,12 @@ powerBtn.addEventListener("click", async () => {
     return;
   }
   let customDNSServers = [];
+  const subscriptionDoh = subscriptionStore.activeItems(subscriptionState).find(item => item.dnsDoh)?.dnsDoh || "";
+  if (!disconnecting && selectedDNS === "subscription-doh" && !subscriptionDoh) {
+    statusText.textContent = "В выбранной подписке нет корректного dns-doh";
+    openSettings();
+    return;
+  }
   if (!disconnecting && selectedDNS === "custom") {
     const validation = parseCustomDNS(customDNSValue);
     if (validation.error) {
@@ -865,7 +885,7 @@ powerBtn.addEventListener("click", async () => {
     }
     const reply = disconnecting
       ? await window.vpnApi.disconnect()
-      : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL);
+      : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL, subscriptionDoh);
     if (!reply.ok) {
       statusText.textContent = reply.error;
     } else if (!disconnecting) {
@@ -1051,6 +1071,23 @@ function activeSubscriptionState(state = subscriptionState) {
   return { items: subscriptionStore.activeItems(state) };
 }
 
+function stateWithImportedMetadata(state, requestedState, imported) {
+  let next = state;
+  if (Array.isArray(imported?.sources)) {
+    for (const source of imported.sources) {
+      const item = requestedState.items[source?.index];
+      if (item && !source?.error && source?.metadata) next = subscriptionStore.updateMetadata(next, item.id, source.metadata);
+    }
+  } else if (requestedState.items.length === 1 && imported?.metadata) {
+    next = subscriptionStore.updateMetadata(next, requestedState.items[0].id, imported.metadata);
+  }
+  return next;
+}
+
+function subscriptionDisplayName(item) {
+  return item?.title || subscriptionStore.displayHost(item?.url);
+}
+
 async function importSubscriptionList(state, trigger) {
   const imported = await requestSubscriptionList(state, trigger);
   applyImportedProfiles(imported);
@@ -1075,9 +1112,12 @@ async function importSubscription(trigger = "manual") {
     applyImportedProfiles(imported, "");
     const added = subscriptionStore.addItem(subscriptionState, value);
     if (added.error && !subscriptionState.items.some(item => item.url === value)) throw new Error(added.error);
-    if (!added.error) {
-      subscriptionState = subscriptionStore.writeState(added.state);
-      editingSubscriptionId = subscriptionState.selectedId;
+    const importedItem = added.item || subscriptionState.items.find(item => item.url === value);
+    if (importedItem) {
+      const baseState = added.error ? subscriptionState : added.state;
+      subscriptionState = subscriptionStore.writeState(stateWithImportedMetadata(baseState, { items: [importedItem] }, imported));
+      editingSubscriptionId = importedItem.id;
+      updateDNSControl();
     }
     if (imported?.skipped > 0) statusText.textContent = `Подписка загружена · пропущено неподдерживаемых: ${imported.skipped}`;
     subscriptionSyncSucceeded();
@@ -1105,7 +1145,10 @@ async function syncSubscription(trigger = "manual") {
   updatePingButton();
   statusText.textContent = trigger === "automatic" ? "Автоматически обновляем подписки…" : "Синхронизируем подписки…";
   try {
-    const imported = await importSubscriptionList(activeSubscriptionState(), trigger);
+    const requestedState = activeSubscriptionState();
+    const imported = await importSubscriptionList(requestedState, trigger);
+    subscriptionState = subscriptionStore.writeState(stateWithImportedMetadata(subscriptionState, requestedState, imported));
+    updateDNSControl();
     const serverCount = serverProfiles.filter(profile => !profile.auto).length;
     const failed = failedSubscriptionCount(imported);
     statusText.textContent = `Подписки синхронизированы · ${serverCount} серверов${failed ? ` · ошибок: ${failed}` : ""}${imported.skipped ? ` · пропущено: ${imported.skipped}` : ""}`;
@@ -1133,15 +1176,19 @@ async function importSavedSubscriptions() {
   try {
     let restoredAll = false;
     let imported;
+    let requestedState = activeSubscriptionState();
     try {
-      imported = await importSubscriptionList(activeSubscriptionState(), "startup");
+      imported = await importSubscriptionList(requestedState, "startup");
     } catch (error) {
       if (!subscriptionState.activeId) throw error;
       const allSubscriptions = { ...subscriptionState, activeId: "" };
-      imported = await importSubscriptionList(activeSubscriptionState(allSubscriptions), "startup");
+      requestedState = activeSubscriptionState(allSubscriptions);
+      imported = await importSubscriptionList(requestedState, "startup");
       subscriptionState = subscriptionStore.writeState(allSubscriptions);
       restoredAll = true;
     }
+    subscriptionState = subscriptionStore.writeState(stateWithImportedMetadata(subscriptionState, requestedState, imported));
+    updateDNSControl();
     const failed = failedSubscriptionCount(imported);
     if (restoredAll) statusText.textContent = "Выбранная подписка недоступна · показаны все доступные";
     else if (failed) statusText.textContent = `Подписки загружены частично · недоступно: ${failed}`;
@@ -1187,7 +1234,7 @@ function renderSubscriptionManager() {
     button.classList.toggle("selected", item.id === subscriptionState.activeId);
     button.classList.toggle("editing", item.id === editingSubscriptionId);
     const name = document.createElement("strong");
-    name.textContent = subscriptionStore.displayHost(item.url);
+    name.textContent = subscriptionDisplayName(item);
     const detail = document.createElement("small");
     detail.textContent = `${item.id === subscriptionState.activeId ? "Только эта · " : ""}Подписка ${index + 1}`;
     button.append(name, detail);
@@ -1200,13 +1247,19 @@ function renderSubscriptionManager() {
   const showForm = addingSubscription || Boolean(edited);
   subscriptionEditorForm.hidden = !showForm;
   subscriptionScopeOverview.hidden = showForm;
-  subscriptionEditorTitle.textContent = edited ? subscriptionStore.displayHost(edited.url) : "Новая подписка";
+  subscriptionEditorTitle.textContent = edited ? subscriptionDisplayName(edited) : "Новая подписка";
   subscriptionEditorHint.textContent = edited
     ? (edited.id === subscriptionState.activeId ? "В списке серверов показана только эта подписка" : "Серверы этой подписки входят в общий список")
     : "Добавьте HTTPS-ссылку";
   managedSubscriptionUrl.value = edited?.url || "";
   managedSubscriptionUrl.removeAttribute("aria-invalid");
   managedSubscriptionError.textContent = "";
+  const hasMetadata = Boolean(edited?.supportUrl || edited?.dnsDoh);
+  subscriptionMetadata.hidden = !hasMetadata;
+  subscriptionSupportBtn.hidden = !edited?.supportUrl;
+  subscriptionSupportBtn.dataset.url = edited?.supportUrl || "";
+  subscriptionDohInfo.hidden = !edited?.dnsDoh;
+  subscriptionDohInfo.textContent = edited?.dnsDoh ? new URL(edited.dnsDoh).hostname : "";
   removeSubscriptionBtn.hidden = !edited;
   saveSubscriptionBtn.textContent = edited ? "Сохранить" : "Добавить подписку";
   addSubscriptionBtn.disabled = requestBusy || subscriptionState.items.length >= subscriptionStore.maxSubscriptions;
@@ -1252,9 +1305,11 @@ async function selectSubscriptionScope(activeId) {
   statusText.textContent = targetId ? "Загружаем выбранную подписку…" : "Объединяем все подписки…";
   updatePingButton();
   try {
-    const imported = await requestSubscriptionList(activeSubscriptionState(changedState), "manual");
+    const requestedState = activeSubscriptionState(changedState);
+    const imported = await requestSubscriptionList(requestedState, "manual");
     applyImportedProfiles(imported);
-    subscriptionState = subscriptionStore.writeState(changedState);
+    subscriptionState = subscriptionStore.writeState(stateWithImportedMetadata(changedState, requestedState, imported));
+    updateDNSControl();
     renderSubscriptionManager();
     subscriptionSyncSucceeded();
     const count = serverProfiles.filter(profile => !profile.auto).length;
@@ -1301,7 +1356,8 @@ async function saveManagedSubscription() {
     const sourceError = imported.sources?.find(source => source.index === sourceIndex)?.error;
     if (sourceError) throw new Error(sourceError);
     if (changedIsVisible) applyImportedProfiles(imported);
-    subscriptionState = subscriptionStore.writeState(changed.state);
+    subscriptionState = subscriptionStore.writeState(stateWithImportedMetadata(changed.state, requestedState, imported));
+    updateDNSControl();
     addingSubscription = false;
     editingSubscriptionId = changedId;
     subscriptionUrl.value = subscriptionState.items[0]?.url || "";
@@ -1341,9 +1397,11 @@ async function removeManagedSubscription() {
   managedSubscriptionError.textContent = "Обновляем список серверов…";
   updatePingButton();
   try {
-    const imported = await requestSubscriptionList(activeSubscriptionState(changedState), "manual");
+    const requestedState = activeSubscriptionState(changedState);
+    const imported = await requestSubscriptionList(requestedState, "manual");
     applyImportedProfiles(imported);
-    subscriptionState = subscriptionStore.writeState(changedState);
+    subscriptionState = subscriptionStore.writeState(stateWithImportedMetadata(changedState, requestedState, imported));
+    updateDNSControl();
     addingSubscription = false;
     editingSubscriptionId = subscriptionState.activeId || "";
     subscriptionUrl.value = subscriptionState.items[0].url;
@@ -1545,6 +1603,12 @@ subscriptionEditorForm.addEventListener("submit", event => {
 managedSubscriptionUrl.addEventListener("input", () => {
   managedSubscriptionError.textContent = "";
   managedSubscriptionUrl.removeAttribute("aria-invalid");
+});
+subscriptionSupportBtn.addEventListener("click", async () => {
+  const url = subscriptionSupportBtn.dataset.url || "";
+  if (!url) return;
+  const reply = await window.vpnApi.openExternalURL(url);
+  if (!reply.ok) managedSubscriptionError.textContent = reply.error || "Не удалось открыть ссылку поддержки";
 });
 removeSubscriptionBtn.addEventListener("click", () => { void removeManagedSubscription(); });
 closeSubscriptionsBtn.addEventListener("click", () => { void closeSubscriptions(); });
