@@ -141,6 +141,7 @@ async fn vpn_connect(
     direct_domains: Option<Vec<String>>,
     geo_ip_url: Option<String>,
     geo_site_url: Option<String>,
+    replace_current: Option<bool>,
     service: State<'_, Service>,
 ) -> Result<Value, String> {
     if profile_id.len() != 24 || !profile_id.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -179,9 +180,14 @@ async fn vpn_connect(
         return Err("Группу можно использовать только с Auto".into());
     }
     let (dns, dns_servers, dns_doh) = validate_dns_request(dns, dns_servers, dns_doh)?;
+    let method = if replace_current.unwrap_or(false) {
+        "switch"
+    } else {
+        "connect"
+    };
     call(
         &service,
-        "connect",
+        method,
         json!({"profileId":profile_id,"dns":dns,"dnsServers":dns_servers,"dnsDoh":dns_doh,"fragmentation":fragmentation.unwrap_or(false),"killSwitch":kill_switch.unwrap_or(false),"autoProfileIds":auto_profile_ids,"routeMode":route_mode,"directDomains":direct_domains,"geoIpUrl":geo_ip_url,"geoSiteUrl":geo_site_url}),
     )
     .await

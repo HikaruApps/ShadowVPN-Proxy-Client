@@ -29,6 +29,7 @@ vm.runInNewContext(fs.readFileSync('src/renderer/tauri-bridge.js', 'utf8'), { wi
   assert.deepEqual([...calls.at(-1)[1].dnsServers], []);
   assert.equal(calls.at(-1)[1].fragmentation, false);
   assert.equal(calls.at(-1)[1].killSwitch, false);
+  assert.equal(calls.at(-1)[1].replaceCurrent, false);
   await window.vpnApi.connect('abcdef', 'quad9'); assert.equal(calls.at(-1)[1].dns, 'quad9');
   await window.vpnApi.connect('abcdef', 'custom', ['192.168.1.1']);
   assert.deepEqual([...calls.at(-1)[1].dnsServers], ['192.168.1.1']);
@@ -46,6 +47,8 @@ vm.runInNewContext(fs.readFileSync('src/renderer/tauri-bridge.js', 'utf8'), { wi
   assert.equal(calls.at(-1)[1].geoSiteUrl, 'https://example.com/geosite.dat');
   await window.vpnApi.connect('abcdef', 'subscription-doh', [], false, false, [], 'full', [], '', '', 'https://dns.example/dns-query');
   assert.equal(calls.at(-1)[1].dnsDoh, 'https://dns.example/dns-query');
+  await window.vpnApi.switchServer('abcdef');
+  assert.equal(calls.at(-1)[0], 'vpn_connect'); assert.equal(calls.at(-1)[1].replaceCurrent, true);
   assert.equal((await window.vpnApi.importSubscription('https://example.com', 'automatic')).error, 'Import failed');
   assert.equal(calls.at(-1)[1].reason, 'automatic');
   await window.vpnApi.importSubscriptions(['https://one.example', 'https://two.example'], 'startup');

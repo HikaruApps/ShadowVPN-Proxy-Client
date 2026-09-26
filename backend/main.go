@@ -174,13 +174,13 @@ func (w *worker) startAutoMonitor(parent context.Context, instance *core.Instanc
 		}
 	}()
 }
-func (w *worker) close() error {
+func (w *worker) closeTunnel(preserveKillSwitch bool) error {
 	w.stopAutoMonitor()
 	w.stopTrafficMonitor()
 	w.clearActiveProfile()
 	var closeErr error
 	if w.instance == nil {
-		if w.killSwitch != nil {
+		if w.killSwitch != nil && !preserveKillSwitch {
 			w.logf("disabling kill switch WFP policy")
 			closeErr = w.killSwitch.Close()
 			w.killSwitch = nil
@@ -190,12 +190,16 @@ func (w *worker) close() error {
 	v := w.instance
 	w.instance = nil
 	closeErr = v.Close()
-	if w.killSwitch != nil {
+	if w.killSwitch != nil && !preserveKillSwitch {
 		w.logf("disabling kill switch WFP policy")
 		closeErr = errors.Join(closeErr, w.killSwitch.Close())
 		w.killSwitch = nil
 	}
 	return closeErr
+}
+
+func (w *worker) close() error {
+	return w.closeTunnel(false)
 }
 func profilesByID(profiles []Profile, ids []string) []Profile {
 	if len(ids) == 0 {
@@ -253,7 +257,15 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 			return errors.New("В выбранном Auto не осталось подходящих серверов из текущей подписки")
 		}
 		w.logf("auto selection started profiles=%d restricted=%t", len(candidates), len(autoProfileIDs) > 0)
-		results := pingProfilesWithMethod(ctx, candidates, "auto")
+		options := pingOptions{}
+		if w.killSwitch != nil {
+			options.OutboundInterface, err = physicalOutboundInterface()
+			if err != nil {
+				return errors.New("Kill Switch не нашёл физический сетевой интерфейс для переключения")
+			}
+			options.AllowEndpoint = w.killSwitch.AllowEndpoint
+		}
+		results := pingProfilesWithMethodOptions(ctx, candidates, "auto", options)
 		_, best, ok := fastestProfile(candidates, results)
 		if !ok {
 			w.logf("auto selection failed: no reachable profiles")
@@ -300,6 +312,15 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 	}
 	w.logf("endpoint bootstrap DNS passed host=%s candidates=%s", bootstrap.OriginalAddress, strings.Join(bootstrap.Candidates, ","))
 	pingCtx, pingCancel := context.WithTimeout(ctx, 6*time.Second)
+	pingOptions := pingOptions{}
+	if w.killSwitch != nil {
+		pingOptions.OutboundInterface, e = physicalOutboundInterface()
+		if e != nil {
+			pingCancel()
+			return errors.New("Kill Switch не нашёл физический сетевой интерфейс для переключения")
+		}
+		pingOptions.AllowEndpoint = w.killSwitch.AllowEndpoint
+	}
 	var latency int64
 	var pingErr error
 	for index, candidate := range bootstrap.Candidates {
@@ -317,9 +338,9 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 		endpoint := net.JoinHostPort(resolved.Address, strconv.Itoa(resolved.Port))
 		w.logf("endpoint bootstrap check started protocol=%s endpoint=%s candidate=%d/%d", selected.Protocol, endpoint, index+1, len(bootstrap.Candidates))
 		if selected.Protocol == "hysteria" {
-			latency, _, pingErr = httpPingProfile(pingCtx, resolved, "head")
+			latency, _, pingErr = httpPingProfileWithOptions(pingCtx, resolved, "head", pingOptions)
 		} else {
-			latency, pingErr = tcpPing(pingCtx, resolved.Address, resolved.Port)
+			latency, _, pingErr = tcpPingEndpointWithOptions(pingCtx, resolved.Address, resolved.Port, pingOptions)
 		}
 		if pingErr == nil {
 			bootstrap.SelectedAddress = candidate
@@ -394,7 +415,22 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 		return errors.New("Ошибка запуска TUN. Проверьте права администратора и сетевые адаптеры")
 	}
 	if killSwitch {
-		w.killSwitch, e = startKillSwitchGuard(allowedEndpoints)
+		if w.killSwitch == nil {
+			w.killSwitch, e = startKillSwitchGuard(allowedEndpoints)
+		} else {
+			for _, endpoint := range allowedEndpoints {
+				if e = w.killSwitch.AllowEndpoint(endpoint); e != nil {
+					break
+				}
+			}
+			if e == nil {
+				var tunnelLUID uint64
+				tunnelLUID, e = tunnelInterfaceLUID()
+				if e == nil {
+					e = w.killSwitch.AllowTunnel(tunnelLUID)
+				}
+			}
+		}
 		if e != nil {
 			w.logf("kill switch activation failed: %v", e)
 			_ = w.close()
@@ -558,6 +594,26 @@ func main() {
 				err = w.connect(ctx, r.ProfileID, r.DNS, r.DNSServers, r.AutoProfileIDs, r.DirectDomains, r.DNSDoH, r.RouteMode, r.GeoIPURL, r.GeoSiteURL, r.Fragment, r.KillSwitch)
 				if err == nil {
 					result = w.currentActiveProfile()
+				}
+			case "switch":
+				w.logf("server switch requested profile_id=%s", r.ProfileID)
+				if w.instance == nil {
+					err = errors.New("VPN уже отключён")
+				} else {
+					w.setState("disconnecting")
+					err = w.closeTunnel(true)
+					if err == nil {
+						w.setState("connecting")
+						err = w.connect(ctx, r.ProfileID, r.DNS, r.DNSServers, r.AutoProfileIDs, r.DirectDomains, r.DNSDoH, r.RouteMode, r.GeoIPURL, r.GeoSiteURL, r.Fragment, r.KillSwitch)
+					}
+					if err == nil {
+						result = w.currentActiveProfile()
+						w.logf("server switch completed profile_id=%s", r.ProfileID)
+					} else {
+						_ = w.close()
+						w.setState("disconnected")
+						w.logf("server switch failed: %v", err)
+					}
 				}
 			case "ping":
 				method := strings.ToLower(r.PingMethod)

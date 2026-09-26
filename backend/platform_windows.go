@@ -30,6 +30,7 @@ type killSwitchGuard struct {
 	sublayerKey windows.GUID
 	mu          sync.Mutex
 	endpoints   map[proxyEndpoint]struct{}
+	tunnels     map[uint64]struct{}
 }
 
 func checkPlatform() error {
@@ -130,6 +131,7 @@ func startKillSwitchGuard(endpoints []proxyEndpoint) (*killSwitchGuard, error) {
 	return &killSwitchGuard{
 		engine: session.engine, providerKey: session.providerKey,
 		sublayerKey: session.sublayerKey, endpoints: allowed,
+		tunnels: map[uint64]struct{}{luid: {}},
 	}, nil
 }
 
@@ -146,6 +148,22 @@ func (guard *killSwitchGuard) AllowEndpoint(endpoint proxyEndpoint) error {
 		return err
 	}
 	guard.endpoints[endpoint] = struct{}{}
+	return nil
+}
+
+func (guard *killSwitchGuard) AllowTunnel(luid uint64) error {
+	if guard == nil || guard.engine == 0 {
+		return nil
+	}
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	if _, exists := guard.tunnels[luid]; exists {
+		return nil
+	}
+	if err := installWFPTunnelFilters(guard.engine, guard.providerKey, guard.sublayerKey, luid); err != nil {
+		return err
+	}
+	guard.tunnels[luid] = struct{}{}
 	return nil
 }
 

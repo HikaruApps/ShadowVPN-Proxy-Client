@@ -325,11 +325,7 @@ func installWFPEndpointFilters(engine uintptr, providerKey, sublayerKey windows.
 	return nil
 }
 
-func installWFPFilters(engine uintptr, providerKey, sublayerKey windows.GUID, tunnelLUID uint64, endpoints []proxyEndpoint) error {
-	if err := installWFPEndpointFilters(engine, providerKey, sublayerKey, endpoints, 0); err != nil {
-		return err
-	}
-
+func installWFPTunnelFilters(engine uintptr, providerKey, sublayerKey windows.GUID, tunnelLUID uint64) error {
 	tunnelCondition := []wfpCondition{{
 		fieldKey: wfpConditionLocalInterface,
 		match:    wfpMatchEqual,
@@ -347,6 +343,16 @@ func installWFPFilters(engine uintptr, providerKey, sublayerKey windows.GUID, tu
 		}
 	}
 	runtime.KeepAlive(tunnelLUID)
+	return nil
+}
+
+func installWFPFilters(engine uintptr, providerKey, sublayerKey windows.GUID, tunnelLUID uint64, endpoints []proxyEndpoint) error {
+	if err := installWFPEndpointFilters(engine, providerKey, sublayerKey, endpoints, 0); err != nil {
+		return err
+	}
+	if err := installWFPTunnelFilters(engine, providerKey, sublayerKey, tunnelLUID); err != nil {
+		return err
+	}
 
 	loopbackCondition := []wfpCondition{{
 		fieldKey: wfpConditionFlags,

@@ -79,6 +79,8 @@ assert.match(styles, /\.setting-card\s*\{[^}]*margin-top:\s*10px/s);
 assert.match(styles, /\.settings-section-title \+ \.setting-card\s*\{[^}]*margin-top:\s*0/s);
 assert.match(styles, /\.subscription-list-item\.selected:focus-visible\s*\{[^}]*outline:\s*none/s);
 assert.match(renderer, /pingBtn\.disabled\s*=\s*requestBusy\s*\|\|\s*!\["disconnected", "connected"\]\.includes\(currentState\)/);
+assert.match(renderer, /if \(switching\) void changeConnection\("switch"\)/);
+assert.match(renderer, /window\.vpnApi\.switchServer\(selectedGroupId/);
 const markup = fs.readFileSync('src/renderer/index.html', 'utf8');
 assert.match(markup, /id="connectedLocation"[^>]*hidden/);
 assert.match(markup, /id="connectedLocationFlag"/);

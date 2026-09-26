@@ -234,9 +234,12 @@ function renderServerList() {
     }
     text.append(name, meta); card.append(icon, text, ping);
     card.addEventListener("click", () => {
-      if (requestBusy || currentState !== "disconnected") return;
+      if (requestBusy || currentState === "connecting" || currentState === "disconnecting") return;
+      const switching = currentState === "connected" && selectedGroupId !== profile.id;
+      if (currentState === "connected" && !switching) return;
       selectedGroupId = profile.id;
       serverList.querySelectorAll(".server-card").forEach(row => row.classList.toggle("selected", row.dataset.groupId === profile.id));
+      if (switching) void changeConnection("switch");
     });
     serverList.append(card);
   }
@@ -888,8 +891,10 @@ async function changeConnection(action = "toggle") {
   if (requestBusy || currentState === "connecting" || currentState === "disconnecting") return;
   if (action === "connect" && currentState === "connected") return;
   if (action === "disconnect" && currentState === "disconnected") return;
+  if (action === "switch" && currentState !== "connected") return;
   if (!serverProfiles.length) { statusText.textContent = "Сначала добавьте подписку"; return; }
   const disconnecting = action === "disconnect" || (action === "toggle" && currentState === "connected");
+  const switching = action === "switch";
   const selectedIsAuto = !disconnecting && [AUTO_PROFILE_ID, AUTO_NO_RU_PROFILE_ID].includes(selectedGroupId);
   const selectedAutoGroup = selectedIsAuto ? groupStore.activeGroup(groupState) : null;
   const selectedAutoProfileIds = selectedIsAuto ? autoProfilesFor(selectedGroupId).map(profile => profile.id) : [];
@@ -939,7 +944,9 @@ async function changeConnection(action = "toggle") {
     }
     const reply = disconnecting
       ? await window.vpnApi.disconnect()
-      : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL, subscriptionDoh);
+      : switching
+        ? await window.vpnApi.switchServer(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL, subscriptionDoh)
+        : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL, subscriptionDoh);
     if (!reply.ok) {
       statusText.textContent = reply.error;
     } else if (!disconnecting) {
