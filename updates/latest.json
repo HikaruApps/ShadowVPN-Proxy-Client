@@ -1,15 +1,15 @@
 {
-    "version":  "0.24.1",
-    "notes":  "ShadowVPN Desktop v0.24.1",
-    "pub_date":  "2026-09-26T22:11:23Z",
+    "version":  "0.24.2",
+    "notes":  "ShadowVPN Desktop v0.24.2",
+    "pub_date":  "2026-09-26T22:23:12Z",
     "platforms":  {
                       "windows-x86_64-nsis":  {
-                                                  "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRUVJrcEdKNkRMdWxadHR0UlIzcVI2RVJudVR5U3lZbmRyV2VrN2xvUU9mVTRVNGdzZUgyU3BHRVBWcWpwSXhaV1c0UnR6ZEFGY2pIVmpJVWw4ZDF3WkhWdkx0WWxMUHdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNDYwNjgzCWZpbGU6U2hhZG93VlBOXzAuMjQuMV94NjQtc2V0dXAuZXhlCkY3R3BYMnlBYVdvamZBd2ZzR0xiZ3p4dFR1RFdHbE5ycWozWWxXenVQUVVKZFhQNTlrbi95RDNSaHNjdkZxR0RsUnVBRE9QMFQ0RDRoNjZMLzZIUUFBPT0K",
-                                                  "url":  "https://github.com/HikaruApps/ShadowVPN-Proxy-Client/releases/download/v0.24.1/ShadowVPN_0.24.1_x64-setup.exe"
+                                                  "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRUVJrcEdKNkRMdXFNbS9veWZIWWlkbXZaTzJOZDRva2loWkJiSmxJOUlYZE8yK0daOHlGM2l6Rm1td0pQQUROWXN4cDYweEwwV1UrbXY2aDNlejNyNnY4RHlwKzE2RXc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNDYxMzkyCWZpbGU6U2hhZG93VlBOXzAuMjQuMl94NjQtc2V0dXAuZXhlCXZlcnNpb246MC4yNC4yCjBTODBZV210UDRMNHJCNTVJVXM3cTYvYnRSR2F3YVdOVitRV0RWZnR1c09nZy9ZNDBod2RIZGFBbXBsdmtza2dscXZ3UCt1dyttUi9VaUxFQk14QkFRPT0K",
+                                                  "url":  "https://github.com/HikaruApps/ShadowVPN-Proxy-Client/releases/download/v0.24.2/ShadowVPN_0.24.2_x64-setup.exe"
                                               },
                       "windows-x86_64":  {
-                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRUVJrcEdKNkRMdWxadHR0UlIzcVI2RVJudVR5U3lZbmRyV2VrN2xvUU9mVTRVNGdzZUgyU3BHRVBWcWpwSXhaV1c0UnR6ZEFGY2pIVmpJVWw4ZDF3WkhWdkx0WWxMUHdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNDYwNjgzCWZpbGU6U2hhZG93VlBOXzAuMjQuMV94NjQtc2V0dXAuZXhlCkY3R3BYMnlBYVdvamZBd2ZzR0xiZ3p4dFR1RFdHbE5ycWozWWxXenVQUVVKZFhQNTlrbi95RDNSaHNjdkZxR0RsUnVBRE9QMFQ0RDRoNjZMLzZIUUFBPT0K",
-                                             "url":  "https://github.com/HikaruApps/ShadowVPN-Proxy-Client/releases/download/v0.24.1/ShadowVPN_0.24.1_x64-setup.exe"
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRUVJrcEdKNkRMdXFNbS9veWZIWWlkbXZaTzJOZDRva2loWkJiSmxJOUlYZE8yK0daOHlGM2l6Rm1td0pQQUROWXN4cDYweEwwV1UrbXY2aDNlejNyNnY4RHlwKzE2RXc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNDYxMzkyCWZpbGU6U2hhZG93VlBOXzAuMjQuMl94NjQtc2V0dXAuZXhlCXZlcnNpb246MC4yNC4yCjBTODBZV210UDRMNHJCNTVJVXM3cTYvYnRSR2F3YVdOVitRV0RWZnR1c09nZy9ZNDBod2RIZGFBbXBsdmtza2dscXZ3UCt1dyttUi9VaUxFQk14QkFRPT0K",
+                                             "url":  "https://github.com/HikaruApps/ShadowVPN-Proxy-Client/releases/download/v0.24.2/ShadowVPN_0.24.2_x64-setup.exe"
                                          }
                   }
 }
