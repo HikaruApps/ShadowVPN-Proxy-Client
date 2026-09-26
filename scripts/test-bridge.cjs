@@ -46,6 +46,10 @@ vm.runInNewContext(fs.readFileSync('src/renderer/tauri-bridge.js', 'utf8'), { wi
   assert.equal(calls.at(-1)[1].geoSiteUrl, 'https://example.com/geosite.dat');
   assert.equal((await window.vpnApi.importSubscription('https://example.com', 'automatic')).error, 'Import failed');
   assert.equal(calls.at(-1)[1].reason, 'automatic');
+  await window.vpnApi.importSubscriptions(['https://one.example', 'https://two.example'], 'startup');
+  assert.equal(calls.at(-1)[0], 'vpn_import_many');
+  assert.deepEqual([...calls.at(-1)[1].urls], ['https://one.example', 'https://two.example']);
+  assert.equal(calls.at(-1)[1].reason, 'startup');
   await window.vpnApi.disconnect(); assert.equal(calls.at(-1)[0], 'vpn_disconnect');
   await window.vpnApi.ping('head'); assert.equal(calls.at(-1)[0], 'vpn_ping'); assert.equal(calls.at(-1)[1].pingMethod, 'head');
   await window.vpnApi.publicIp(true); assert.equal(calls.at(-1)[0], 'vpn_public_ip'); assert.equal(calls.at(-1)[1].masked, true);

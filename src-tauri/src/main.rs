@@ -45,7 +45,11 @@ fn validate_geodata_url(value: Option<String>, title: &str) -> Result<String, St
     Ok(value)
 }
 #[tauri::command]
-async fn vpn_import(url: String, reason: Option<String>, service: State<'_, Service>) -> Result<Value, String> {
+async fn vpn_import(
+    url: String,
+    reason: Option<String>,
+    service: State<'_, Service>,
+) -> Result<Value, String> {
     if url.len() > 8192 || !url.starts_with("https://") {
         return Err("Нужна HTTPS-ссылка на подписку".into());
     }
@@ -55,6 +59,30 @@ async fn vpn_import(url: String, reason: Option<String>, service: State<'_, Serv
         _ => "manual",
     };
     call(&service, "import", json!({"url":url,"reason":reason})).await
+}
+#[tauri::command]
+async fn vpn_import_many(
+    urls: Vec<String>,
+    reason: Option<String>,
+    service: State<'_, Service>,
+) -> Result<Value, String> {
+    if urls.is_empty() || urls.len() > 16 {
+        return Err("Добавьте от 1 до 16 подписок".into());
+    }
+    let total_length: usize = urls.iter().map(String::len).sum();
+    if total_length > 48 * 1024
+        || urls
+            .iter()
+            .any(|url| url.len() > 8192 || !url.starts_with("https://"))
+    {
+        return Err("Для каждой подписки нужна HTTPS-ссылка".into());
+    }
+    let reason = match reason.as_deref() {
+        Some("startup") => "startup",
+        Some("automatic") => "automatic",
+        _ => "manual",
+    };
+    call(&service, "importMany", json!({"urls":urls,"reason":reason})).await
 }
 #[tauri::command]
 async fn vpn_connect(
@@ -91,7 +119,11 @@ async fn vpn_connect(
         )
     };
     if auto_profile_ids.len() > 512
-        || auto_profile_ids.iter().any(|id| id.len() != 24 || !id.bytes().all(|b| b.is_ascii_hexdigit()) || id.bytes().all(|b| b == b'0'))
+        || auto_profile_ids.iter().any(|id| {
+            id.len() != 24
+                || !id.bytes().all(|b| b.is_ascii_hexdigit())
+                || id.bytes().all(|b| b == b'0')
+        })
     {
         return Err("Некорректный состав Auto-группы".into());
     }
@@ -114,7 +146,10 @@ async fn vpn_disconnect(service: State<'_, Service>) -> Result<Value, String> {
     call(&service, "disconnect", json!({})).await
 }
 #[tauri::command]
-async fn vpn_ping(ping_method: Option<String>, service: State<'_, Service>) -> Result<Value, String> {
+async fn vpn_ping(
+    ping_method: Option<String>,
+    service: State<'_, Service>,
+) -> Result<Value, String> {
     let ping_method = match ping_method.as_deref() {
         Some("head") => "head",
         Some("get") => "get",
@@ -149,10 +184,22 @@ fn vpn_set_autostart(enabled: bool) -> Result<bool, String> {
     #[cfg(windows)]
     {
         let output = if enabled {
-            let executable = std::env::current_exe().map_err(|_| "Не удалось определить путь ShadowVPN".to_string())?;
+            let executable = std::env::current_exe()
+                .map_err(|_| "Не удалось определить путь ShadowVPN".to_string())?;
             let command = format!("\"{}\"", executable.display());
             std::process::Command::new("schtasks.exe")
-                .args(["/Create", "/TN", AUTOSTART_TASK_NAME, "/SC", "ONLOGON", "/TR", &command, "/RL", "HIGHEST", "/F"])
+                .args([
+                    "/Create",
+                    "/TN",
+                    AUTOSTART_TASK_NAME,
+                    "/SC",
+                    "ONLOGON",
+                    "/TR",
+                    &command,
+                    "/RL",
+                    "HIGHEST",
+                    "/F",
+                ])
                 .output()
         } else {
             std::process::Command::new("schtasks.exe")
@@ -261,6 +308,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             vpn_import,
+            vpn_import_many,
             vpn_connect,
             vpn_disconnect,
             vpn_ping,

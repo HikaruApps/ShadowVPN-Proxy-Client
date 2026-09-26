@@ -76,6 +76,21 @@ func TestDuplicateProfiles(t *testing.T) {
 	}
 }
 
+func TestMergeSubscriptionProfilesPreservesOrderAndRemovesDuplicates(t *testing.T) {
+	first, err := parseSubscription([]byte(sample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondProfile, err := parseURI(strings.Replace(sample, "example.com", "second.example.com", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged := mergeSubscriptionProfiles(first, []Profile{first[0], secondProfile})
+	if len(merged) != 2 || merged[0].ID != first[0].ID || merged[1].ID != secondProfile.ID {
+		t.Fatalf("unexpected merged profiles: %#v", merged)
+	}
+}
+
 func TestMixedURISubscriptionSkipsUnsupportedProtocols(t *testing.T) {
 	skipped := 0
 	profiles, err := parseSubscriptionWithStats([]byte("ss://ignored@example.com:443#Legacy\n"+sample+"\nhysteria2://secret@example.com:443?sni=cover.example&alpn=h3#Fast"), &skipped)

@@ -29,6 +29,7 @@ type request struct {
 	ID             int      `json:"id"`
 	Method         string   `json:"method"`
 	URL            string   `json:"url"`
+	URLs           []string `json:"urls"`
 	Reason         string   `json:"reason"`
 	ProfileID      string   `json:"profileId"`
 	DNS            string   `json:"dns"`
@@ -520,6 +521,35 @@ func main() {
 						w.logf("subscription sync completed profiles=%d skipped_unsupported=%d", len(ps), skipped)
 					} else {
 						w.logf("subscription sync failed: %v", err)
+					}
+				}
+			case "importMany":
+				trigger := r.Reason
+				if trigger != "startup" && trigger != "automatic" {
+					trigger = "manual"
+				}
+				w.logf("subscription batch sync started trigger=%s sources=%d", trigger, len(r.URLs))
+				if len(r.URLs) == 0 || len(r.URLs) > 16 {
+					err = errors.New("Добавьте от 1 до 16 подписок")
+				} else if w.instance != nil {
+					err = errors.New("Отключите VPN перед обновлением подписок")
+				} else {
+					var ps []Profile
+					var sources []subscriptionSourceStatus
+					var skipped int
+					ps, sources, skipped, err = fetchSubscriptions(ctx, r.URLs)
+					if err == nil {
+						w.profiles = ps
+						result = map[string]any{"profiles": profilesForRenderer(ps), "skipped": skipped, "sources": sources}
+						failed := 0
+						for _, source := range sources {
+							if source.Error != "" {
+								failed++
+							}
+						}
+						w.logf("subscription batch sync completed sources=%d failed=%d profiles=%d skipped_unsupported=%d", len(sources), failed, len(ps), skipped)
+					} else {
+						w.logf("subscription batch sync failed: %v", err)
 					}
 				}
 			case "connect":

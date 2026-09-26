@@ -38,6 +38,8 @@ node scripts/test-bridge.cjs
 if ($LASTEXITCODE -ne 0) { throw 'Frontend bridge test failed.' }
 node scripts/test-renderer-helpers.cjs
 if ($LASTEXITCODE -ne 0) { throw 'Frontend renderer helper test failed.' }
+node scripts/test-subscription-store.cjs
+if ($LASTEXITCODE -ne 0) { throw 'Frontend subscription store test failed.' }
 if (-not (Test-Path 'node_modules\@tauri-apps\cli')) {
     npm.cmd ci
     if ($LASTEXITCODE -ne 0) { throw 'npm install failed.' }

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -96,6 +97,76 @@ func fetchSubscription(ctx context.Context, address string) ([]Profile, int, err
 	skipped := 0
 	profiles, err := parseSubscriptionWithStats(b, &skipped)
 	return profiles, skipped, err
+}
+
+type subscriptionSourceStatus struct {
+	Index    int    `json:"index"`
+	Profiles int    `json:"profiles"`
+	Skipped  int    `json:"skipped"`
+	Error    string `json:"error,omitempty"`
+}
+
+type subscriptionFetchResult struct {
+	index    int
+	profiles []Profile
+	skipped  int
+	err      error
+}
+
+func mergeSubscriptionProfiles(profileSets ...[]Profile) []Profile {
+	seen := make(map[string]struct{})
+	var merged []Profile
+	for _, profiles := range profileSets {
+		for _, profile := range profiles {
+			if _, exists := seen[profile.ID]; exists {
+				continue
+			}
+			seen[profile.ID] = struct{}{}
+			merged = append(merged, profile)
+		}
+	}
+	return merged
+}
+
+func fetchSubscriptions(ctx context.Context, addresses []string) ([]Profile, []subscriptionSourceStatus, int, error) {
+	results := make([]subscriptionFetchResult, len(addresses))
+	var wait sync.WaitGroup
+	for index, address := range addresses {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			profiles, skipped, err := fetchSubscription(ctx, address)
+			results[index] = subscriptionFetchResult{index: index, profiles: profiles, skipped: skipped, err: err}
+		}()
+	}
+	wait.Wait()
+
+	sets := make([][]Profile, 0, len(results))
+	statuses := make([]subscriptionSourceStatus, 0, len(results))
+	totalSkipped := 0
+	successful := 0
+	firstError := ""
+	for _, result := range results {
+		status := subscriptionSourceStatus{Index: result.index, Profiles: len(result.profiles), Skipped: result.skipped}
+		if result.err != nil {
+			status.Error = result.err.Error()
+			if firstError == "" {
+				firstError = status.Error
+			}
+		} else {
+			successful++
+			sets = append(sets, result.profiles)
+			totalSkipped += result.skipped
+		}
+		statuses = append(statuses, status)
+	}
+	if successful == 0 {
+		if firstError == "" {
+			firstError = "Список подписок пуст"
+		}
+		return nil, statuses, 0, errors.New(firstError)
+	}
+	return mergeSubscriptionProfiles(sets...), statuses, totalSkipped, nil
 }
 func parseSubscription(b []byte) ([]Profile, error) {
 	return parseSubscriptionWithStats(b, nil)

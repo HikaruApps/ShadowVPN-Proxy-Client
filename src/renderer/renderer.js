@@ -15,7 +15,7 @@ const logsMenuItem = document.getElementById("logsMenuItem");
 const syncSubscriptionBtn = document.getElementById("syncSubscriptionBtn");
 const settingsMenuItem = document.getElementById("settingsMenuItem");
 const groupsMenuItem = document.getElementById("groupsMenuItem");
-const changeSubscriptionBtn = document.getElementById("changeSubscriptionBtn");
+const manageSubscriptionsBtn = document.getElementById("manageSubscriptionsBtn");
 const settingsOverlay = document.getElementById("settingsOverlay");
 const closeSettingsBtn = document.getElementById("closeSettingsBtn");
 const dnsSelect = document.getElementById("dnsSelect");
@@ -79,6 +79,17 @@ const groupSelectAllBtn = document.getElementById("groupSelectAllBtn");
 const groupClearBtn = document.getElementById("groupClearBtn");
 const groupHosts = document.getElementById("groupHosts");
 const deleteGroupBtn = document.getElementById("deleteGroupBtn");
+const subscriptionsOverlay = document.getElementById("subscriptionsOverlay");
+const closeSubscriptionsBtn = document.getElementById("closeSubscriptionsBtn");
+const addSubscriptionBtn = document.getElementById("addSubscriptionBtn");
+const subscriptionsList = document.getElementById("subscriptionsList");
+const subscriptionEditorForm = document.getElementById("subscriptionEditorForm");
+const subscriptionEditorTitle = document.getElementById("subscriptionEditorTitle");
+const subscriptionEditorHint = document.getElementById("subscriptionEditorHint");
+const managedSubscriptionUrl = document.getElementById("managedSubscriptionUrl");
+const managedSubscriptionError = document.getElementById("managedSubscriptionError");
+const removeSubscriptionBtn = document.getElementById("removeSubscriptionBtn");
+const saveSubscriptionBtn = document.getElementById("saveSubscriptionBtn");
 
 let selectedGroupId = "auto";
 const AUTO_PROFILE_ID = "000000000000000000000000";
@@ -99,7 +110,10 @@ const { serverFlagAndName, sortServerProfiles, filterServerProfiles } = window.s
 const { normalizeTraffic, formatBytes, formatSpeed } = window.shadowVpnTraffic;
 const { dnsProviders, readDNS, writeDNS, readCustomDNS, writeCustomDNS, readFragmentation, writeFragmentation, readKillSwitch, writeKillSwitch, autoUpdateIntervals, readAutoUpdate, writeAutoUpdate, readLastSubscriptionSync, writeLastSubscriptionSync, pingMethods, readPingMethod, writePingMethod, readPingOnOpen, writePingOnOpen, routingModes, readRoutingMode, writeRoutingMode, readRoutingDomains, writeRoutingDomains, readGeoIPURL, writeGeoIPURL, readGeoSiteURL, writeGeoSiteURL, validateGeoDataSources, parseCustomDNS } = window.shadowVpnSettings;
 const groupStore = window.shadowVpnGroups;
+const subscriptionStore = window.shadowVpnSubscriptions;
 let groupState = groupStore.readState();
+let subscriptionState = subscriptionStore.readState();
+let editingSubscriptionId = subscriptionState.selectedId;
 let editingGroupId = groupState.groups[0]?.id || "";
 let selectedDNS = readDNS();
 let customDNSValue = readCustomDNS();
@@ -472,7 +486,7 @@ function updatePingButton() {
     || (currentState === "disconnected" && !selectedGroupId);
   pingBtn.disabled = requestBusy || currentState !== "disconnected" || serverProfiles.length === 0;
   syncSubscriptionBtn.disabled = requestBusy || currentState !== "disconnected";
-  changeSubscriptionBtn.disabled = requestBusy || currentState !== "disconnected";
+  manageSubscriptionsBtn.disabled = requestBusy || currentState !== "disconnected";
   groupsMenuItem.disabled = requestBusy || currentState !== "disconnected";
 }
 
@@ -926,7 +940,6 @@ const welcomeScreen = document.getElementById("welcomeScreen");
 const dashboard = document.getElementById("dashboard");
 const subscriptionUrl = document.getElementById("subscriptionUrl");
 const subscriptionError = document.getElementById("subscriptionError");
-const subscriptionStorageKey = "shadowvpn.subscriptionUrl";
 function autoUpdateIntervalMs() {
   return (autoUpdateIntervals.find(item => item.id === selectedAutoUpdate)?.minutes || 0) * 60000;
 }
@@ -978,10 +991,7 @@ function updatePingMethodControl() {
   pingBtn.title = `Измерить ${label}`;
 }
 function validSubscriptionUrl(value) {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" && Boolean(url.hostname) && !url.username && !url.password;
-  } catch { return false; }
+  return subscriptionStore.validURL(value);
 }
 let screenTransitionRunning = false;
 async function switchScreen(from, to, focusTarget) {
@@ -1009,6 +1019,38 @@ async function switchScreen(from, to, focusTarget) {
 function openDashboard() {
   return switchScreen(welcomeScreen, dashboard, powerBtn);
 }
+
+function normalizeImportResult(value) {
+  return Array.isArray(value) ? { profiles: value, skipped: 0, sources: [] } : value;
+}
+
+function failedSubscriptionCount(imported) {
+  return Array.isArray(imported?.sources) ? imported.sources.filter(source => source?.error).length : 0;
+}
+
+function applyImportedProfiles(imported, previousSelection = selectedGroupId) {
+  if (!Array.isArray(imported?.profiles) || !imported.profiles.length) throw new Error("В подписках нет серверов");
+  serverProfiles = imported.profiles;
+  groupState = groupStore.writeState(groupState);
+  selectedGroupId = serverProfiles.some(profile => profile.id === previousSelection) ? previousSelection : serverProfiles[0].id;
+  pingResults.clear();
+  renderServerList();
+}
+
+async function requestSubscriptionList(state, trigger) {
+  const urls = state.items.map(item => item.url);
+  if (!urls.length) throw new Error("Сначала добавьте подписку");
+  const reply = await window.vpnApi.importSubscriptions(urls, trigger);
+  if (!reply.ok) throw new Error(reply.error);
+  return normalizeImportResult(reply.result);
+}
+
+async function importSubscriptionList(state, trigger) {
+  const imported = await requestSubscriptionList(state, trigger);
+  applyImportedProfiles(imported);
+  return imported;
+}
+
 async function importSubscription(trigger = "manual") {
   if (requestBusy) return;
   const value = subscriptionUrl.value.trim();
@@ -1023,15 +1065,15 @@ async function importSubscription(trigger = "manual") {
   try {
     const reply = await window.vpnApi.importSubscription(value, trigger);
     if (!reply.ok) throw new Error(reply.error);
-    const imported = Array.isArray(reply.result) ? { profiles: reply.result, skipped: 0 } : reply.result;
-    serverProfiles = imported?.profiles || [];
-    groupState = groupStore.writeState(groupState);
-    pingResults.clear();
-    if (!serverProfiles.length) throw new Error("В подписке нет серверов");
-    selectedGroupId = serverProfiles[0].id;
-    renderServerList();
+    const imported = normalizeImportResult(reply.result);
+    applyImportedProfiles(imported, "");
+    const added = subscriptionStore.addItem(subscriptionState, value);
+    if (added.error && !subscriptionState.items.some(item => item.url === value)) throw new Error(added.error);
+    if (!added.error) {
+      subscriptionState = subscriptionStore.writeState(added.state);
+      editingSubscriptionId = subscriptionState.selectedId;
+    }
     if (imported?.skipped > 0) statusText.textContent = `Подписка загружена · пропущено неподдерживаемых: ${imported.skipped}`;
-    try { localStorage.setItem(subscriptionStorageKey, value); } catch { /* Import still works for this session. */ }
     subscriptionSyncSucceeded();
     await openDashboard();
     void loadDirectIp();
@@ -1044,10 +1086,8 @@ async function importSubscription(trigger = "manual") {
 
 async function syncSubscription(trigger = "manual") {
   if (requestBusy || currentState !== "disconnected") return;
-  let value = subscriptionUrl.value.trim();
-  try { value = localStorage.getItem(subscriptionStorageKey) || value; } catch { /* Use the form value. */ }
-  if (!validSubscriptionUrl(value)) {
-    statusText.textContent = "Ссылка подписки не найдена";
+  if (!subscriptionState.items.length) {
+    statusText.textContent = "Подписки не найдены";
     await switchScreen(dashboard, welcomeScreen, subscriptionUrl);
     return;
   }
@@ -1057,20 +1097,12 @@ async function syncSubscription(trigger = "manual") {
   powerBtn.disabled = true;
   syncSubscriptionBtn.classList.add("syncing");
   updatePingButton();
-  statusText.textContent = trigger === "automatic" ? "Автоматически обновляем подписку…" : "Синхронизируем подписку…";
+  statusText.textContent = trigger === "automatic" ? "Автоматически обновляем подписки…" : "Синхронизируем подписки…";
   try {
-    const reply = await window.vpnApi.importSubscription(value, trigger);
-    if (!reply.ok) throw new Error(reply.error);
-    const imported = Array.isArray(reply.result) ? { profiles: reply.result, skipped: 0 } : reply.result;
-    if (!Array.isArray(imported?.profiles) || !imported.profiles.length) throw new Error("В подписке нет серверов");
-    const previousSelection = selectedGroupId;
-    serverProfiles = imported.profiles;
-    groupState = groupStore.writeState(groupState);
-    selectedGroupId = serverProfiles.some(profile => profile.id === previousSelection) ? previousSelection : serverProfiles[0].id;
-    pingResults.clear();
-    renderServerList();
+    const imported = await importSubscriptionList(subscriptionState, trigger);
     const serverCount = serverProfiles.filter(profile => !profile.auto).length;
-    statusText.textContent = `Подписка синхронизирована · ${serverCount} серверов${imported.skipped ? ` · пропущено: ${imported.skipped}` : ""}`;
+    const failed = failedSubscriptionCount(imported);
+    statusText.textContent = `Подписки синхронизированы · ${serverCount} серверов${failed ? ` · ошибок: ${failed}` : ""}${imported.skipped ? ` · пропущено: ${imported.skipped}` : ""}`;
     subscriptionSyncSucceeded();
   } catch (error) {
     statusText.textContent = error.message || "Не удалось обновить подписку";
@@ -1083,11 +1115,177 @@ async function syncSubscription(trigger = "manual") {
   }
 }
 
+async function importSavedSubscriptions() {
+  if (!subscriptionState.items.length || requestBusy) return;
+  subscriptionUrl.value = subscriptionState.items[0].url;
+  requestBusy = true;
+  const button = document.querySelector(".subscription-submit");
+  button.disabled = true;
+  subscriptionUrl.disabled = true;
+  button.textContent = "Загружаем серверы…";
+  subscriptionError.textContent = "";
+  try {
+    const imported = await importSubscriptionList(subscriptionState, "startup");
+    const failed = failedSubscriptionCount(imported);
+    if (failed) statusText.textContent = `Подписки загружены частично · недоступно: ${failed}`;
+    subscriptionSyncSucceeded();
+    await openDashboard();
+    void loadDirectIp();
+    if (pingOnOpenEnabled) window.setTimeout(() => void runPingTest(), 450);
+  } catch (error) {
+    subscriptionError.textContent = error.message || "Ошибка импорта подписок";
+  } finally {
+    requestBusy = false;
+    button.disabled = false;
+    subscriptionUrl.disabled = false;
+    button.textContent = "Добавить подписку";
+    updatePingButton();
+  }
+}
+
+function currentEditedSubscription() {
+  return subscriptionState.items.find(item => item.id === editingSubscriptionId) || null;
+}
+
+function renderSubscriptionManager() {
+  const edited = currentEditedSubscription();
+  subscriptionsList.replaceChildren();
+  subscriptionState.items.forEach((item, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "subscription-list-item";
+    button.classList.toggle("selected", item.id === editingSubscriptionId);
+    const name = document.createElement("strong");
+    name.textContent = subscriptionStore.displayHost(item.url);
+    const detail = document.createElement("small");
+    detail.textContent = `Подписка ${index + 1}`;
+    button.append(name, detail);
+    button.addEventListener("click", () => {
+      editingSubscriptionId = item.id;
+      subscriptionState = subscriptionStore.writeState({ ...subscriptionState, selectedId: item.id });
+      renderSubscriptionManager();
+    });
+    subscriptionsList.append(button);
+  });
+
+  subscriptionEditorTitle.textContent = edited ? subscriptionStore.displayHost(edited.url) : "Новая подписка";
+  subscriptionEditorHint.textContent = edited ? "Серверы этой подписки входят в общий список" : "Добавьте HTTPS-ссылку";
+  managedSubscriptionUrl.value = edited?.url || "";
+  managedSubscriptionUrl.removeAttribute("aria-invalid");
+  managedSubscriptionError.textContent = "";
+  removeSubscriptionBtn.hidden = !edited;
+  saveSubscriptionBtn.textContent = edited ? "Сохранить" : "Добавить подписку";
+  addSubscriptionBtn.disabled = requestBusy || subscriptionState.items.length >= subscriptionStore.maxSubscriptions;
+}
+
+function openSubscriptions() {
+  if (requestBusy || currentState !== "disconnected") return;
+  setMenuOpen(false);
+  editingSubscriptionId = subscriptionState.selectedId || subscriptionState.items[0]?.id || "";
+  subscriptionsOverlay.hidden = false;
+  renderSubscriptionManager();
+  (currentEditedSubscription() ? subscriptionsList.querySelector(".selected") : managedSubscriptionUrl)?.focus({ preventScroll: true });
+}
+
+async function closeSubscriptions() {
+  if (subscriptionsOverlay.hidden || requestBusy) return;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!reduceMotion) await subscriptionsOverlay.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: "ease-in" }).finished;
+  subscriptionsOverlay.hidden = true;
+  menuBtn.focus({ preventScroll: true });
+}
+
+function setSubscriptionEditorBusy(busy) {
+  managedSubscriptionUrl.disabled = busy;
+  saveSubscriptionBtn.disabled = busy;
+  removeSubscriptionBtn.disabled = busy;
+  addSubscriptionBtn.disabled = busy || subscriptionState.items.length >= subscriptionStore.maxSubscriptions;
+}
+
+async function saveManagedSubscription() {
+  if (requestBusy || currentState !== "disconnected") return;
+  const value = managedSubscriptionUrl.value.trim();
+  const edited = currentEditedSubscription();
+  const changed = edited
+    ? subscriptionStore.updateItem(subscriptionState, edited.id, value)
+    : subscriptionStore.addItem(subscriptionState, value);
+  if (changed.error) {
+    managedSubscriptionError.textContent = changed.error;
+    managedSubscriptionUrl.setAttribute("aria-invalid", "true");
+    managedSubscriptionUrl.focus();
+    return;
+  }
+
+  requestBusy = true;
+  setSubscriptionEditorBusy(true);
+  managedSubscriptionError.textContent = "Проверяем подписку…";
+  updatePingButton();
+  try {
+    const changedId = edited?.id || changed.item.id;
+    const sourceIndex = changed.state.items.findIndex(item => item.id === changedId);
+    const imported = await requestSubscriptionList(changed.state, "manual");
+    const sourceError = imported.sources?.find(source => source.index === sourceIndex)?.error;
+    if (sourceError) throw new Error(sourceError);
+    applyImportedProfiles(imported);
+    subscriptionState = subscriptionStore.writeState(changed.state);
+    editingSubscriptionId = changedId;
+    subscriptionUrl.value = subscriptionState.items[0]?.url || "";
+    renderSubscriptionManager();
+    subscriptionSyncSucceeded();
+    const failed = failedSubscriptionCount(imported);
+    statusText.textContent = `${edited ? "Подписка обновлена" : "Подписка добавлена"}${failed ? ` · недоступно других: ${failed}` : ""}`;
+  } catch (error) {
+    managedSubscriptionError.textContent = error.message || "Не удалось загрузить подписку";
+    managedSubscriptionUrl.setAttribute("aria-invalid", "true");
+  } finally {
+    requestBusy = false;
+    setSubscriptionEditorBusy(false);
+    updatePingButton();
+  }
+}
+
+async function removeManagedSubscription() {
+  const edited = currentEditedSubscription();
+  if (!edited || requestBusy || currentState !== "disconnected") return;
+  const changedState = subscriptionStore.removeItem(subscriptionState, edited.id);
+  if (!changedState.items.length) {
+    subscriptionState = subscriptionStore.writeState(changedState);
+    editingSubscriptionId = "";
+    serverProfiles = [];
+    selectedGroupId = "";
+    pingResults.clear();
+    subscriptionUrl.value = "";
+    renderServerList();
+    await closeSubscriptions();
+    await switchScreen(dashboard, welcomeScreen, subscriptionUrl);
+    return;
+  }
+
+  requestBusy = true;
+  setSubscriptionEditorBusy(true);
+  managedSubscriptionError.textContent = "Обновляем список серверов…";
+  updatePingButton();
+  try {
+    const imported = await requestSubscriptionList(changedState, "manual");
+    applyImportedProfiles(imported);
+    subscriptionState = subscriptionStore.writeState(changedState);
+    editingSubscriptionId = subscriptionState.selectedId;
+    subscriptionUrl.value = subscriptionState.items[0].url;
+    renderSubscriptionManager();
+    subscriptionSyncSucceeded();
+    const failed = failedSubscriptionCount(imported);
+    statusText.textContent = `Подписка удалена${failed ? ` · недоступно: ${failed}` : ""}`;
+  } catch (error) {
+    managedSubscriptionError.textContent = error.message || "Не удалось обновить список серверов";
+  } finally {
+    requestBusy = false;
+    setSubscriptionEditorBusy(false);
+    updatePingButton();
+  }
+}
+
 document.getElementById("subscriptionForm").addEventListener("submit", event => { event.preventDefault(); void importSubscription("manual"); });
-try {
-  const saved = localStorage.getItem(subscriptionStorageKey);
-  if (saved && validSubscriptionUrl(saved)) { subscriptionUrl.value = saved; void importSubscription("startup"); }
-} catch { /* Storage may be unavailable. */ }
+if (subscriptionState.items.length) void importSavedSubscriptions();
 subscriptionUrl.addEventListener("input", () => {
   subscriptionError.textContent = "";
   subscriptionUrl.removeAttribute("aria-invalid");
@@ -1256,11 +1454,24 @@ copyHwidBtn.addEventListener("click", async () => {
   copyHwidBtn.textContent = "Скопировано";
   window.setTimeout(() => { copyHwidBtn.textContent = "Копировать"; }, 1200);
 });
-changeSubscriptionBtn.addEventListener("click", () => {
-  if (requestBusy || currentState !== "disconnected") return;
-  setMenuOpen(false);
-  switchScreen(dashboard, welcomeScreen, subscriptionUrl);
+manageSubscriptionsBtn.addEventListener("click", openSubscriptions);
+addSubscriptionBtn.addEventListener("click", () => {
+  if (requestBusy || subscriptionState.items.length >= subscriptionStore.maxSubscriptions) return;
+  editingSubscriptionId = "";
+  renderSubscriptionManager();
+  managedSubscriptionUrl.focus({ preventScroll: true });
 });
+subscriptionEditorForm.addEventListener("submit", event => {
+  event.preventDefault();
+  void saveManagedSubscription();
+});
+managedSubscriptionUrl.addEventListener("input", () => {
+  managedSubscriptionError.textContent = "";
+  managedSubscriptionUrl.removeAttribute("aria-invalid");
+});
+removeSubscriptionBtn.addEventListener("click", () => { void removeManagedSubscription(); });
+closeSubscriptionsBtn.addEventListener("click", () => { void closeSubscriptions(); });
+subscriptionsOverlay.addEventListener("click", event => { if (event.target === subscriptionsOverlay) void closeSubscriptions(); });
 closeLogsBtn.addEventListener("click", closeLogs);
 logsOverlay.addEventListener("click", event => { if (event.target === logsOverlay) closeLogs(); });
 closeSettingsBtn.addEventListener("click", closeSettings);
@@ -1297,6 +1508,7 @@ document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
   if (!settingsOverlay.hidden) closeSettings();
   else if (!groupsOverlay.hidden) closeGroups();
+  else if (!subscriptionsOverlay.hidden) void closeSubscriptions();
   else if (!logsOverlay.hidden) closeLogs();
   else if (menuOpen) setMenuOpen(false);
   else if (sortMenuOpen) setSortMenuOpen(false);
