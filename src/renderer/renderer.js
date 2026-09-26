@@ -44,6 +44,8 @@ const autoStartDescription = document.getElementById("autoStartDescription");
 const pingOnOpenToggle = document.getElementById("pingOnOpenToggle");
 const deviceHwid = document.getElementById("deviceHwid");
 const copyHwidBtn = document.getElementById("copyHwidBtn");
+const appUpdateDescription = document.getElementById("appUpdateDescription");
+const checkUpdateBtn = document.getElementById("checkUpdateBtn");
 const logsOverlay = document.getElementById("logsOverlay");
 const logsOutput = document.getElementById("logsOutput");
 const logsCount = document.getElementById("logsCount");
@@ -136,6 +138,8 @@ let geoSiteURLValue = readGeoSiteURL();
 let autoUpdateTimer = null;
 let pendingSubscriptionRefresh = false;
 let currentHWID = "";
+let availableUpdateVersion = "";
+let updateBusy = false;
 const sortStorageKey = "shadowvpn.serverSort";
 const sortModes = new Set(["alphabetical", "subscription", "latency"]);
 let selectedSort = "subscription";
@@ -653,6 +657,43 @@ async function loadDeviceInfo() {
   }
 }
 
+async function handleClientUpdate() {
+  if (updateBusy) return;
+  updateBusy = true;
+  checkUpdateBtn.disabled = true;
+  if (availableUpdateVersion) {
+    checkUpdateBtn.textContent = "Скачиваем…";
+    appUpdateDescription.textContent = `Скачиваем подписанное обновление ${availableUpdateVersion}`;
+    const reply = await window.vpnApi.installUpdate();
+    if (!reply.ok) {
+      appUpdateDescription.textContent = reply.error || "Не удалось установить обновление";
+      checkUpdateBtn.textContent = "Повторить обновление";
+      checkUpdateBtn.disabled = false;
+      updateBusy = false;
+    }
+    return;
+  }
+  checkUpdateBtn.textContent = "Проверяем…";
+  appUpdateDescription.textContent = "Проверяем наличие новой версии";
+  const reply = await window.vpnApi.checkUpdate();
+  updateBusy = false;
+  checkUpdateBtn.disabled = false;
+  if (!reply.ok) {
+    appUpdateDescription.textContent = reply.error || "Не удалось проверить обновление";
+    checkUpdateBtn.textContent = "Повторить проверку";
+    return;
+  }
+  if (reply.result?.available && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(reply.result.version || "")) {
+    availableUpdateVersion = reply.result.version;
+    appUpdateDescription.textContent = `Доступна версия ${availableUpdateVersion}`;
+    checkUpdateBtn.textContent = "Обновить клиент";
+  } else {
+    const currentVersion = reply.result?.currentVersion || "текущая";
+    appUpdateDescription.textContent = `Установлена актуальная версия ${currentVersion}`;
+    checkUpdateBtn.textContent = "Проверить обновление";
+  }
+}
+
 async function loadAutoStart() {
   autoStartToggle.disabled = true;
   const reply = await window.vpnApi.getAutoStart();
@@ -961,6 +1002,20 @@ window.vpnApi.onLog(line => {
   if (logsOverlay.hidden) return;
   if (logsLoading) pendingLogLines.push(line);
   else appendLogLine(line);
+});
+window.vpnApi.onUpdateProgress(progress => {
+  if (!updateBusy || !availableUpdateVersion) return;
+  if (progress?.finished) {
+    checkUpdateBtn.textContent = "Устанавливаем…";
+    appUpdateDescription.textContent = "Проверяем подпись и запускаем установщик";
+    return;
+  }
+  const downloaded = Number(progress?.downloaded);
+  const total = Number(progress?.total);
+  if (Number.isFinite(downloaded) && Number.isFinite(total) && total > 0) {
+    const percent = Math.min(100, Math.round(downloaded * 100 / total));
+    checkUpdateBtn.textContent = `Скачиваем ${percent}%`;
+  }
 });
 window.vpnApi.getState().then(applyPolledState);
 
@@ -1605,6 +1660,7 @@ copyHwidBtn.addEventListener("click", async () => {
   copyHwidBtn.textContent = "Скопировано";
   window.setTimeout(() => { copyHwidBtn.textContent = "Копировать"; }, 1200);
 });
+checkUpdateBtn.addEventListener("click", () => { void handleClientUpdate(); });
 manageSubscriptionsBtn.addEventListener("click", openSubscriptions);
 addSubscriptionBtn.addEventListener("click", () => {
   if (requestBusy || subscriptionState.items.length >= subscriptionStore.maxSubscriptions) return;

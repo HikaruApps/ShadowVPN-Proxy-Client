@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const appVersion = "0.23.4"
+const appVersion = "0.23.5"
 const appUserAgent = "shadowvpn/" + appVersion
 
 type deviceInfo struct {

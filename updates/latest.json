@@ -1,0 +1,11 @@
+{
+    "version":  "0.23.5",
+    "notes":  "ShadowVPN Desktop v0.23.5",
+    "pub_date":  "2026-09-26T20:57:59Z",
+    "platforms":  {
+                      "windows-x86_64-nsis":  {
+                                                  "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRUVJrcEdKNkRMdXNPNnp0bHFmRThZMmZqZWp4UHYvVGhlY05PZGRnY2M4ekRPem1XZUxFSlR5MlAwQnJBY0UyT1RnbHJ4UjhWT0szZ2U3cTI1NSszcXcxNTBuVEdtRVFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNDU2Mjc5CWZpbGU6U2hhZG93VlBOXzAuMjMuNV94NjQtc2V0dXAuZXhlCmM0Q3k2cVZiZjMxeXZpNkNFNHkzYnNWRnhWS1BvWXBsdk1NV05uMEh5ZUJvOHJuTk56S2ROblh4MVl4ZldFU3ZPOHI0bEtMUC9JREZmQlZHZXZsK0J3PT0K",
+                                                  "url":  "https://github.com/HikaruApps/ShadowVPN-Proxy-Client/releases/download/v0.23.5/ShadowVPN_0.23.5_x64-setup.exe"
+                                              }
+                  }
+}

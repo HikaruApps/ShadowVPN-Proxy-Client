@@ -21,7 +21,13 @@ if ($hostTriple -ne 'x86_64-pc-windows-msvc') { throw "Windows x64 MSVC Rust is 
 $previousGOOS = $env:GOOS
 $previousGOARCH = $env:GOARCH
 $previousCGO = $env:CGO_ENABLED
+$previousGoCache = $env:GOCACHE
+$previousGoTemp = $env:GOTMPDIR
 try {
+    $goBuildCache = Join-Path ([IO.Path]::GetTempPath()) 'shadowvpn-go-cache'
+    $goBuildTemp = Join-Path ([IO.Path]::GetTempPath()) 'shadowvpn-go-tmp'
+    New-Item -ItemType Directory -Force -Path $goBuildCache,$goBuildTemp | Out-Null
+    $env:GOCACHE = $goBuildCache; $env:GOTMPDIR = $goBuildTemp
     $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:CGO_ENABLED = '0'
     Push-Location backend
     try {
@@ -32,8 +38,23 @@ try {
     } finally { Pop-Location }
 } finally {
     $env:GOOS = $previousGOOS; $env:GOARCH = $previousGOARCH; $env:CGO_ENABLED = $previousCGO
+    $env:GOCACHE = $previousGoCache; $env:GOTMPDIR = $previousGoTemp
 }
 if (-not (Test-Path 'bin\wintun.dll')) { throw 'bin\wintun.dll is missing. Restore it from the project archive.' }
+$localUpdaterKey = Join-Path $projectRoot 'src-tauri\.updater\shadowvpn.key'
+$localUpdaterPassword = Join-Path $projectRoot 'src-tauri\.updater\shadowvpn.key.password'
+if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+    if ($env:TAURI_SIGNING_PRIVATE_KEY_PATH) {
+        $env:TAURI_SIGNING_PRIVATE_KEY = $env:TAURI_SIGNING_PRIVATE_KEY_PATH
+    } elseif (Test-Path -LiteralPath $localUpdaterKey) {
+        $env:TAURI_SIGNING_PRIVATE_KEY = $localUpdaterKey
+    } else {
+        throw 'Updater signing key is missing. Restore src-tauri\.updater\shadowvpn.key or set TAURI_SIGNING_PRIVATE_KEY.'
+    }
+}
+if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -and (Test-Path -LiteralPath $localUpdaterPassword)) {
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content -LiteralPath $localUpdaterPassword -Raw).Trim()
+}
 node scripts/test-bridge.cjs
 if ($LASTEXITCODE -ne 0) { throw 'Frontend bridge test failed.' }
 node scripts/test-renderer-helpers.cjs
@@ -48,4 +69,7 @@ if (-not (Test-Path 'node_modules\@tauri-apps\cli')) {
 }
 npm.cmd run build
 if ($LASTEXITCODE -ne 0) { throw 'Tauri build failed.' }
+& "$projectRoot\scripts\write-update-manifest.ps1"
+if ($LASTEXITCODE -ne 0) { throw 'Updater manifest generation failed.' }
 Write-Host 'Done. Installer: src-tauri\target\release\bundle\nsis\'
+Write-Host 'Upload the .exe and .exe.sig files to GitHub Release, then commit updates\latest.json.'

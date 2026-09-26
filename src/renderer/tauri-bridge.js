@@ -6,6 +6,7 @@
   const profileSubscribers = new Set();
   const trafficSubscribers = new Set();
   const logSubscribers = new Set();
+  const updateProgressSubscribers = new Set();
   const ready = listen('vpn:state', event => {
     for (const callback of subscribers) callback(event.payload);
   });
@@ -22,6 +23,9 @@
   listen('vpn:log', event => {
     for (const callback of logSubscribers) callback(event.payload);
   }).catch(() => {});
+  listen('vpn:update-progress', event => {
+    for (const callback of updateProgressSubscribers) callback(event.payload);
+  }).catch(() => {});
   async function call(command, args = {}) {
     try { await ready; return { ok: true, result: await invoke(command, args) }; }
     catch (error) { return { ok: false, error: String(error) }; }
@@ -35,6 +39,8 @@
     ping: (pingMethod = 'tcp') => call('vpn_ping', { pingMethod }),
     publicIp: (masked = false) => call('vpn_public_ip', { masked }),
     deviceInfo: () => call('vpn_device_info'),
+    checkUpdate: () => call('vpn_check_update'),
+    installUpdate: () => call('vpn_install_update'),
     getAutoStart: () => call('vpn_get_autostart'),
     setAutoStart: enabled => call('vpn_set_autostart', { enabled }),
     getState: async () => { await ready; return invoke('vpn_get_state'); },
@@ -44,5 +50,6 @@
     onProfileChange: callback => { profileSubscribers.add(callback); return () => profileSubscribers.delete(callback); },
     onTraffic: callback => { trafficSubscribers.add(callback); return () => trafficSubscribers.delete(callback); },
     onLog: callback => { logSubscribers.add(callback); return () => logSubscribers.delete(callback); },
+    onUpdateProgress: callback => { updateProgressSubscribers.add(callback); return () => updateProgressSubscribers.delete(callback); },
   });
 })();

@@ -58,12 +58,17 @@ vm.runInNewContext(fs.readFileSync('src/renderer/tauri-bridge.js', 'utf8'), { wi
   await window.vpnApi.ping('head'); assert.equal(calls.at(-1)[0], 'vpn_ping'); assert.equal(calls.at(-1)[1].pingMethod, 'head');
   await window.vpnApi.publicIp(true); assert.equal(calls.at(-1)[0], 'vpn_public_ip'); assert.equal(calls.at(-1)[1].masked, true);
   await window.vpnApi.deviceInfo(); assert.equal(calls.at(-1)[0], 'vpn_device_info');
+  await window.vpnApi.checkUpdate(); assert.equal(calls.at(-1)[0], 'vpn_check_update');
+  await window.vpnApi.installUpdate(); assert.equal(calls.at(-1)[0], 'vpn_install_update');
   await window.vpnApi.getAutoStart(); assert.equal(calls.at(-1)[0], 'vpn_get_autostart');
   await window.vpnApi.setAutoStart(true); assert.equal(calls.at(-1)[0], 'vpn_set_autostart'); assert.equal(calls.at(-1)[1].enabled, true);
   await window.vpnApi.getLogs(); assert.equal(calls.at(-1)[0], 'vpn_get_logs');
   await window.vpnApi.clearLogs(); assert.equal(calls.at(-1)[0], 'vpn_clear_logs');
   let logLine; const stopLogs = window.vpnApi.onLog(value => { logLine = value; });
   listeners.get('vpn:log')({ payload: 'Xray diagnostic' }); assert.equal(logLine, 'Xray diagnostic'); stopLogs();
+  let updateProgress; const stopUpdateProgress = window.vpnApi.onUpdateProgress(value => { updateProgress = value; });
+  listeners.get('vpn:update-progress')({ payload: { downloaded: 512, total: 1024 } });
+  assert.equal(updateProgress.downloaded, 512); stopUpdateProgress();
   listeners.get('vpn:error')({payload:'Shutdown pending'}); assert.equal(elements.statusText.textContent, 'Shutdown pending');
   console.log('Tauri bridge: state/profile/traffic listeners, unsubscribe, commands, errors passed.');
 })().catch(e => { console.error(e); process.exit(1); });

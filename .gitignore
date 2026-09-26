@@ -4,3 +4,4 @@ src-tauri/gen/
 *.log
 bin/shadowvpn-core.exe
 *.zip
+src-tauri/.updater/

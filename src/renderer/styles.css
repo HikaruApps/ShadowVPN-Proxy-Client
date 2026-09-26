@@ -640,7 +640,7 @@ body {
 .setting-copy { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .setting-copy strong { color: #e6e6e6; font-size: 13px; font-weight: 600; }
 .setting-copy small { overflow: hidden; color: #747474; font-size: 10.5px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
-.device-card { margin-bottom: 10px; }
+.device-card { margin-bottom: 0; }
 .device-value-wrap { min-width: 0; display: flex; align-items: center; gap: 7px; }
 .device-value-wrap code { width: 220px; color: #aaa; font: 9.5px/1.35 "Cascadia Code", "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; user-select: text; }
 .device-value-wrap button { padding: 7px 9px; border: 1px solid #303030; border-radius: 8px; background: #101010; color: #999; font: inherit; font-size: 9.5px; cursor: pointer; }
@@ -663,6 +663,8 @@ body {
 .setting-action:hover:not(:disabled) { border-color: #595959; background: #191919; color: #fff; }
 .setting-action:focus-visible { outline: none; border-color: #6a6a6a; box-shadow: 0 0 0 3px rgba(255, 255, 255, .045); }
 .setting-action:disabled { border-color: #292929; color: #666; cursor: default; }
+.app-update-card { min-height: 66px; }
+.app-update-button { min-width: 148px; }
 .select-shell { position: relative; flex: 0 0 auto; }
 .select-shell select {
   min-width: 190px;

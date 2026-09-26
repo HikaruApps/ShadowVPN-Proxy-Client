@@ -7,6 +7,7 @@ use std::sync::{
     Arc,
 };
 use tauri::{Emitter, Manager, State};
+use tauri_plugin_updater::UpdaterExt;
 
 const AUTOSTART_TASK_NAME: &str = "ShadowVPN Auto Start";
 
@@ -15,6 +16,23 @@ struct Service(Result<Arc<Backend>, String>);
 struct Closing {
     active: AtomicBool,
     finished: AtomicBool,
+}
+#[derive(Default)]
+struct Updating(Arc<AtomicBool>);
+struct UpdateGuard(Arc<AtomicBool>);
+
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn begin_update(updating: &Updating) -> Result<UpdateGuard, String> {
+    let active = updating.0.clone();
+    active
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "Проверка или установка обновления уже выполняется".to_string())?;
+    Ok(UpdateGuard(active))
 }
 
 async fn call(service: &Service, method: &'static str, data: Value) -> Result<Value, String> {
@@ -189,6 +207,73 @@ async fn vpn_device_info(service: State<'_, Service>) -> Result<Value, String> {
     query(&service, "deviceInfo", json!({})).await
 }
 #[tauri::command]
+async fn vpn_check_update(
+    app: tauri::AppHandle,
+    updating: State<'_, Updating>,
+) -> Result<Value, String> {
+    let _guard = begin_update(&updating)?;
+    let current_version = app.package_info().version.to_string();
+    let update = app
+        .updater()
+        .map_err(|error| format!("Не удалось запустить проверку обновлений: {error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("Не удалось проверить обновления: {error}"))?;
+    Ok(match update {
+        Some(update) => json!({
+            "available": true,
+            "currentVersion": current_version,
+            "version": update.version,
+            "notes": update.body.unwrap_or_default().chars().take(1000).collect::<String>(),
+        }),
+        None => json!({
+            "available": false,
+            "currentVersion": current_version,
+        }),
+    })
+}
+#[tauri::command]
+async fn vpn_install_update(
+    app: tauri::AppHandle,
+    service: State<'_, Service>,
+    updating: State<'_, Updating>,
+) -> Result<(), String> {
+    let _guard = begin_update(&updating)?;
+    let backend = service.0.clone()?;
+    let exit_app = app.clone();
+    let updater = app
+        .updater_builder()
+        .on_before_exit(move || {
+            let _ = backend.shutdown();
+            exit_app.cleanup_before_exit();
+        })
+        .build()
+        .map_err(|error| format!("Не удалось запустить установщик обновления: {error}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|error| format!("Не удалось проверить обновление перед установкой: {error}"))?
+        .ok_or_else(|| "Новая версия больше недоступна".to_string())?;
+    let progress_app = app.clone();
+    let finished_app = app.clone();
+    let mut downloaded = 0usize;
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded = downloaded.saturating_add(chunk);
+                let _ = progress_app.emit(
+                    "vpn:update-progress",
+                    json!({"downloaded": downloaded, "total": total}),
+                );
+            },
+            move || {
+                let _ = finished_app.emit("vpn:update-progress", json!({"finished": true}));
+            },
+        )
+        .await
+        .map_err(|error| format!("Не удалось установить обновление: {error}"))
+}
+#[tauri::command]
 fn vpn_get_autostart() -> Result<bool, String> {
     #[cfg(windows)]
     {
@@ -295,7 +380,9 @@ fn main() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Closing::default())
+        .manage(Updating::default())
         .setup(|app| {
             let name = if cfg!(windows) {
                 "shadowvpn-core.exe"
@@ -338,6 +425,8 @@ fn main() {
             vpn_ping,
             vpn_public_ip,
             vpn_device_info,
+            vpn_check_update,
+            vpn_install_update,
             vpn_get_autostart,
             vpn_set_autostart,
             vpn_get_state,
