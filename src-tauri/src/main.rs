@@ -1,10 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use serde_json::{json, Value};
-use shadowvpn::backend::Backend;
+use shadowvpn::backend::{terminate_stale_cores, Backend};
 use shadowvpn::settings::{valid_https_endpoint, validate_dns_request};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -15,7 +15,49 @@ use tauri_plugin_updater::UpdaterExt;
 
 const AUTOSTART_TASK_NAME: &str = "ShadowVPN Auto Start";
 
-struct Service(Result<Arc<Backend>, String>);
+type Spawner = Box<dyn Fn() -> Result<Arc<Backend>, String> + Send + Sync>;
+
+/// Owns the Go core and starts a fresh one when the previous process exited
+/// (crash, request timeout, or its own hung-TUN watchdog).
+struct Service {
+    current: Mutex<Result<Arc<Backend>, String>>,
+    spawner: Spawner,
+    closing: AtomicBool,
+}
+
+impl Service {
+    fn new(spawner: Spawner) -> Self {
+        let current = spawner();
+        Self {
+            current: Mutex::new(current),
+            spawner,
+            closing: AtomicBool::new(false),
+        }
+    }
+
+    fn backend(&self) -> Result<Arc<Backend>, String> {
+        let mut current = self.current.lock().unwrap();
+        if let Ok(backend) = current.as_ref() {
+            if !backend.is_finished() {
+                return Ok(backend.clone());
+            }
+        }
+        if self.closing.load(Ordering::Acquire) {
+            return Err("Приложение завершает работу".into());
+        }
+        let previous_logs = current.as_ref().ok().map(|backend| backend.logs());
+        let next = (self.spawner)();
+        if let (Ok(backend), Some(logs)) = (&next, previous_logs) {
+            backend.prepend_logs(logs);
+        }
+        *current = next.clone();
+        next
+    }
+
+    fn peek(&self) -> Result<Arc<Backend>, String> {
+        self.current.lock().unwrap().clone()
+    }
+}
 #[derive(Default)]
 struct Closing {
     active: AtomicBool,
@@ -40,13 +82,13 @@ fn begin_update(updating: &Updating) -> Result<UpdateGuard, String> {
 }
 
 async fn call(service: &Service, method: &'static str, data: Value) -> Result<Value, String> {
-    let backend = service.0.clone()?;
+    let backend = service.backend()?;
     tauri::async_runtime::spawn_blocking(move || backend.request(method, data))
         .await
         .map_err(|_| "Ошибка потока ядра".to_string())?
 }
 async fn query(service: &Service, method: &'static str, data: Value) -> Result<Value, String> {
-    let backend = service.0.clone()?;
+    let backend = service.backend()?;
     tauri::async_runtime::spawn_blocking(move || backend.query(method, data))
         .await
         .map_err(|_| "Ошибка потока ядра".to_string())?
@@ -78,6 +120,7 @@ async fn vpn_import(
     let reason = match reason.as_deref() {
         Some("startup") => "startup",
         Some("automatic") => "automatic",
+        Some("cache") => "cache",
         _ => "manual",
     };
     call(&service, "import", json!({"url":url,"reason":reason})).await
@@ -102,6 +145,7 @@ async fn vpn_import_many(
     let reason = match reason.as_deref() {
         Some("startup") => "startup",
         Some("automatic") => "automatic",
+        Some("cache") => "cache",
         _ => "manual",
     };
     call(&service, "importMany", json!({"urls":urls,"reason":reason})).await
@@ -249,7 +293,7 @@ async fn vpn_install_update(
     updating: State<'_, Updating>,
 ) -> Result<(), String> {
     let _guard = begin_update(&updating)?;
-    let backend = service.0.clone()?;
+    let backend = service.peek()?;
     let exit_app = app.clone();
     let updater = app
         .updater_builder()
@@ -336,19 +380,18 @@ fn vpn_set_autostart(enabled: bool) -> Result<bool, String> {
 #[tauri::command]
 fn vpn_get_state(service: State<'_, Service>) -> String {
     service
-        .0
-        .as_ref()
+        .peek()
         .map(|b| b.state.lock().unwrap().clone())
         .unwrap_or_else(|_| "disconnected".into())
 }
 #[tauri::command]
 fn vpn_get_logs(service: State<'_, Service>) -> Result<Vec<String>, String> {
-    let backend = service.0.as_ref().map_err(Clone::clone)?;
+    let backend = service.peek()?;
     Ok(backend.logs())
 }
 #[tauri::command]
 fn vpn_clear_logs(service: State<'_, Service>) -> Result<(), String> {
-    let backend = service.0.as_ref().map_err(Clone::clone)?;
+    let backend = service.peek()?;
     backend.clear_logs();
     Ok(())
 }
@@ -365,7 +408,9 @@ fn request_shutdown(app: tauri::AppHandle, restart: bool) {
     if app.state::<Closing>().active.swap(true, Ordering::AcqRel) {
         return;
     }
-    let backend = app.state::<Service>().0.clone();
+    let service = app.state::<Service>();
+    service.closing.store(true, Ordering::Release);
+    let backend = service.peek();
     tauri::async_runtime::spawn(async move {
         let result = if let Ok(backend) = backend {
             tauri::async_runtime::spawn_blocking(move || backend.shutdown())
@@ -476,30 +521,47 @@ fn main() {
             } else {
                 app.path().resource_dir()?.join("bin")
             };
-            let state_handle = app.handle().clone();
-            let profile_handle = app.handle().clone();
-            let traffic_handle = app.handle().clone();
-            let log_handle = app.handle().clone();
+            let executable = directory.join(name);
+            let handle = app.handle().clone();
             let connect_menu_item = connect_item.clone();
             let disconnect_menu_item = disconnect_item.clone();
-            let service = Backend::spawn(
-                &directory.join(name),
-                move |state| {
-                    let _ = connect_menu_item.set_enabled(state == "disconnected");
-                    let _ = disconnect_menu_item.set_enabled(state == "connected");
-                    let _ = state_handle.emit("vpn:state", state);
-                },
-                move |profile| {
-                    let _ = profile_handle.emit("vpn:profile", profile);
-                },
-                move |traffic| {
-                    let _ = traffic_handle.emit("vpn:traffic", traffic);
-                },
-                move |line| {
-                    let _ = log_handle.emit("vpn:log", line);
-                },
-            );
-            app.manage(Service(service));
+            let spawner: Spawner = Box::new(move || {
+                terminate_stale_cores(&executable);
+                let state_handle = handle.clone();
+                let profile_handle = handle.clone();
+                let traffic_handle = handle.clone();
+                let log_handle = handle.clone();
+                let exit_handle = handle.clone();
+                let connect_menu_item = connect_menu_item.clone();
+                let disconnect_menu_item = disconnect_menu_item.clone();
+                Backend::spawn(
+                    &executable,
+                    move |state| {
+                        let _ = connect_menu_item.set_enabled(state == "disconnected");
+                        let _ = disconnect_menu_item.set_enabled(state == "connected");
+                        let _ = state_handle.emit("vpn:state", state);
+                    },
+                    move |profile| {
+                        let _ = profile_handle.emit("vpn:profile", profile);
+                    },
+                    move |traffic| {
+                        let _ = traffic_handle.emit("vpn:traffic", traffic);
+                    },
+                    move |line| {
+                        let _ = log_handle.emit("vpn:log", line);
+                    },
+                    move || {
+                        let closing = exit_handle
+                            .try_state::<Service>()
+                            .map(|service| service.closing.load(Ordering::Acquire))
+                            .unwrap_or(false);
+                        if !closing {
+                            let _ = exit_handle.emit("vpn:core-exited", ());
+                        }
+                    },
+                )
+            });
+            app.manage(Service::new(spawner));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

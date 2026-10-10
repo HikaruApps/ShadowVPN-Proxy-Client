@@ -12,11 +12,14 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/net/idna"
 )
 
 type Profile struct {
@@ -145,10 +148,45 @@ func subscriptionMetadataFromHeaders(header http.Header) subscriptionMetadata {
 	}
 }
 
-func fetchSubscription(ctx context.Context, address string) ([]Profile, int, subscriptionMetadata, error) {
+type subscriptionLogf func(format string, values ...any)
+
+func subscriptionHost(address string) string {
+	if parsed, err := url.Parse(address); err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	return "invalid"
+}
+
+func validSubscriptionURL(address string) bool {
 	u, e := url.Parse(address)
-	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
-		return nil, 0, subscriptionMetadata{}, errors.New("Нужна HTTPS-ссылка на подписку")
+	return e == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil
+}
+
+// downloadSubscription retries once: right after login, resume or a TUN
+// teardown Windows often needs a moment before DNS and routes settle.
+func downloadSubscription(ctx context.Context, address string, logf subscriptionLogf) ([]byte, subscriptionMetadata, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 2; attempt++ {
+		body, metadata, retry, err := downloadSubscriptionOnce(ctx, address, logf)
+		if err == nil {
+			return body, metadata, nil
+		}
+		lastErr = err
+		if !retry || attempt == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, subscriptionMetadata{}, lastErr
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+	return nil, subscriptionMetadata{}, lastErr
+}
+
+func downloadSubscriptionOnce(ctx context.Context, address string, logf subscriptionLogf) ([]byte, subscriptionMetadata, bool, error) {
+	if !validSubscriptionURL(address) {
+		return nil, subscriptionMetadata{}, false, errors.New("Нужна HTTPS-ссылка на подписку")
 	}
 	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 		if len(via) >= 5 || r.URL.Scheme != "https" || r.URL.User != nil {
@@ -156,31 +194,91 @@ func fetchSubscription(ctx context.Context, address string) ([]Profile, int, sub
 		}
 		return nil
 	}}
-	req, e := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	defer client.CloseIdleConnections()
+	req, e := http.NewRequestWithContext(ctx, "GET", address, nil)
 	if e != nil {
-		return nil, 0, subscriptionMetadata{}, errors.New("Некорректная ссылка")
+		return nil, subscriptionMetadata{}, false, errors.New("Некорректная ссылка")
 	}
 	setClientIdentityHeaders(req, currentDeviceInfo())
 	req.Header.Set("Accept", "application/json, text/plain;q=0.9")
+	host := subscriptionHost(address)
 	resp, e := client.Do(req)
 	if e != nil {
-		return nil, 0, subscriptionMetadata{}, errors.New("Не удалось загрузить подписку. Проверьте интернет и ссылку")
+		cause, message := subscriptionFetchReason(e)
+		if logf != nil {
+			logf("subscription download failed host=%s cause=%s", host, cause)
+		}
+		return nil, subscriptionMetadata{}, !strings.HasPrefix(cause, "tls:"), errors.New(message)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, 0, subscriptionMetadata{}, fmt.Errorf("Сервер подписки вернул HTTP %d", resp.StatusCode)
+		if logf != nil {
+			logf("subscription download failed host=%s status=%d", host, resp.StatusCode)
+		}
+		return nil, subscriptionMetadata{}, resp.StatusCode >= 500, fmt.Errorf("Сервер подписки вернул HTTP %d", resp.StatusCode)
 	}
 	metadata := subscriptionMetadataFromHeaders(resp.Header)
 	b, e := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
 	if e != nil {
-		return nil, 0, metadata, errors.New("Ошибка чтения подписки")
+		if logf != nil {
+			cause, _ := subscriptionFetchReason(e)
+			logf("subscription read failed host=%s cause=%s", host, cause)
+		}
+		return nil, metadata, true, errors.New("Ошибка чтения подписки")
 	}
 	if len(b) > 4*1024*1024 {
-		return nil, 0, metadata, errors.New("Подписка превышает 4 МБ")
+		return nil, metadata, false, errors.New("Подписка превышает 4 МБ")
 	}
-	skipped := 0
-	profiles, err := parseSubscriptionWithStats(b, &skipped)
-	return profiles, skipped, metadata, err
+	return b, metadata, false, nil
+}
+
+// fetchSubscription loads one source. With preferCache the saved copy is used
+// without touching the network; otherwise the network wins and the saved copy
+// is only a fallback when the download fails.
+func fetchSubscription(ctx context.Context, address string, preferCache bool, logf subscriptionLogf) ([]Profile, int, subscriptionMetadata, bool, error) {
+	if !validSubscriptionURL(address) {
+		return nil, 0, subscriptionMetadata{}, false, errors.New("Нужна HTTPS-ссылка на подписку")
+	}
+	host := subscriptionHost(address)
+	fromCache := func() ([]Profile, int, subscriptionMetadata, bool, error) {
+		cached, err := loadSubscriptionCache(address)
+		if err != nil {
+			return nil, 0, subscriptionMetadata{}, false, err
+		}
+		skipped := 0
+		profiles, err := parseSubscriptionWithStats(cached.Body, &skipped)
+		if err != nil {
+			return nil, 0, subscriptionMetadata{}, false, err
+		}
+		if logf != nil {
+			logf("subscription loaded from cache host=%s saved_at=%s profiles=%d", host, time.Unix(cached.SavedAt, 0).UTC().Format(time.RFC3339), len(profiles))
+		}
+		return profiles, skipped, cached.Metadata, true, nil
+	}
+	if preferCache {
+		if profiles, skipped, metadata, cached, err := fromCache(); err == nil {
+			return profiles, skipped, metadata, cached, nil
+		}
+	}
+	body, metadata, err := downloadSubscription(ctx, address, logf)
+	if err == nil {
+		skipped := 0
+		var profiles []Profile
+		profiles, err = parseSubscriptionWithStats(body, &skipped)
+		if err == nil {
+			if saveErr := saveSubscriptionCache(address, body, metadata); saveErr != nil && logf != nil {
+				logf("subscription cache write failed host=%s: %v", host, saveErr)
+			}
+			return profiles, skipped, metadata, false, nil
+		}
+	}
+	if profiles, skipped, cachedMetadata, cached, cacheErr := fromCache(); cacheErr == nil {
+		if logf != nil {
+			logf("subscription refresh failed, using saved copy host=%s error=%q", host, err.Error())
+		}
+		return profiles, skipped, cachedMetadata, cached, nil
+	}
+	return nil, 0, metadata, false, err
 }
 
 type subscriptionSourceStatus struct {
@@ -188,6 +286,7 @@ type subscriptionSourceStatus struct {
 	Profiles int                  `json:"profiles"`
 	Skipped  int                  `json:"skipped"`
 	Metadata subscriptionMetadata `json:"metadata"`
+	Cached   bool                 `json:"cached,omitempty"`
 	Error    string               `json:"error,omitempty"`
 }
 
@@ -196,6 +295,7 @@ type subscriptionFetchResult struct {
 	profiles []Profile
 	skipped  int
 	metadata subscriptionMetadata
+	cached   bool
 	err      error
 }
 
@@ -214,15 +314,15 @@ func mergeSubscriptionProfiles(profileSets ...[]Profile) []Profile {
 	return merged
 }
 
-func fetchSubscriptions(ctx context.Context, addresses []string) ([]Profile, []subscriptionSourceStatus, int, error) {
+func fetchSubscriptions(ctx context.Context, addresses []string, preferCache bool, logf subscriptionLogf) ([]Profile, []subscriptionSourceStatus, int, error) {
 	results := make([]subscriptionFetchResult, len(addresses))
 	var wait sync.WaitGroup
 	for index, address := range addresses {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			profiles, skipped, metadata, err := fetchSubscription(ctx, address)
-			results[index] = subscriptionFetchResult{index: index, profiles: profiles, skipped: skipped, metadata: metadata, err: err}
+			profiles, skipped, metadata, cached, err := fetchSubscription(ctx, address, preferCache, logf)
+			results[index] = subscriptionFetchResult{index: index, profiles: profiles, skipped: skipped, metadata: metadata, cached: cached, err: err}
 		}()
 	}
 	wait.Wait()
@@ -233,7 +333,7 @@ func fetchSubscriptions(ctx context.Context, addresses []string) ([]Profile, []s
 	successful := 0
 	firstError := ""
 	for _, result := range results {
-		status := subscriptionSourceStatus{Index: result.index, Profiles: len(result.profiles), Skipped: result.skipped, Metadata: result.metadata}
+		status := subscriptionSourceStatus{Index: result.index, Profiles: len(result.profiles), Skipped: result.skipped, Metadata: result.metadata, Cached: result.cached}
 		if result.err != nil {
 			status.Error = result.err.Error()
 			if firstError == "" {
@@ -275,39 +375,10 @@ func parseSubscriptionWithStats(b []byte, skippedUnsupported *int) ([]Profile, e
 			items = append(items, item)
 		}
 		for _, item := range items {
-			name, _ := item["remarks"].(string)
-			outs, _ := item["outbounds"].([]any)
-			if _, ok := item["protocol"]; ok {
-				outs = []any{item}
-			}
-			for _, raw := range outs {
-				out, ok := raw.(map[string]any)
-				if !ok {
-					continue
-				}
-				proto, _ := out["protocol"].(string)
-				switch proto {
-				case "vless", "vmess", "trojan", "shadowsocks", "hysteria":
-				default:
-					continue
-				}
-				// Import connection settings only. Never accept subscription-supplied listeners,
-				// routing, local source addresses, proxy chaining, or socket/interface overrides.
-				clean := map[string]any{"protocol": proto, "settings": out["settings"], "tag": "proxy"}
-				if st, ok := out["streamSettings"].(map[string]any); ok {
-					copy := map[string]any{}
-					for k, v := range st {
-						if k != "sockopt" && k != "finalmask" {
-							copy[k] = v
-						}
-					}
-					clean["streamSettings"] = copy
-				}
-				if name == "" {
-					name, _ = out["tag"].(string)
-				}
-				profiles = append(profiles, newProfile(name, clean))
-				break
+			if profile, ok := profileFromXrayJSON(item); ok {
+				profiles = append(profiles, profile)
+			} else if skippedUnsupported != nil {
+				(*skippedUnsupported)++
 			}
 		}
 	} else {
@@ -360,6 +431,98 @@ func parseSubscriptionWithStats(b []byte, skippedUnsupported *int) ([]Profile, e
 	}
 	return unique, nil
 }
+
+var xrayJSONProtocols = map[string]bool{"vless": true, "vmess": true, "trojan": true, "shadowsocks": true, "hysteria": true}
+
+// profileFromXrayJSON imports one full Xray client config (Remnawave, Marzban
+// and similar panels return an array of them) or a bare outbound. The proxy is
+// the outbound tagged "proxy", else the first supported one.
+func profileFromXrayJSON(item map[string]any) (Profile, bool) {
+	name, _ := item["remarks"].(string)
+	outs, _ := item["outbounds"].([]any)
+	if _, ok := item["protocol"]; ok {
+		outs = []any{item}
+	}
+	var selected map[string]any
+	for _, raw := range outs {
+		out, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		proto, _ := out["protocol"].(string)
+		if !xrayJSONProtocols[proto] {
+			continue
+		}
+		if tag, _ := out["tag"].(string); tag == "proxy" {
+			selected = out
+			break
+		}
+		if selected == nil {
+			selected = out
+		}
+	}
+	if selected == nil {
+		return Profile{}, false
+	}
+	clean := sanitizedOutbound(selected)
+	if address, port := endpointFromOutbound(clean); address == "" || port < 1 || port > 65535 {
+		return Profile{}, false
+	}
+	if name == "" {
+		name, _ = selected["tag"].(string)
+	}
+	return newProfile(name, clean), true
+}
+
+// sanitizedOutbound imports connection settings only. Subscription-supplied
+// listeners, routing, proxy chaining, reverse tunnels, sockopt (interface,
+// mark, dialerProxy) and TCP masks are dropped; the client owns those. UDP
+// masks (Hysteria2 salamander obfs) and QUIC parameters are kept because the
+// server requires them.
+func sanitizedOutbound(out map[string]any) map[string]any {
+	proto, _ := out["protocol"].(string)
+	settings, _ := cloneObject(map[string]any{"settings": out["settings"]})
+	cleanSettings, _ := settings["settings"].(map[string]any)
+	if cleanSettings != nil {
+		delete(cleanSettings, "reverse")
+	}
+	clean := map[string]any{"protocol": proto, "settings": cleanSettings, "tag": "proxy"}
+	if st, ok := out["streamSettings"].(map[string]any); ok {
+		copy := map[string]any{}
+		for k, v := range st {
+			switch k {
+			case "sockopt":
+			case "finalmask":
+				if mask := sanitizedFinalMask(v); mask != nil {
+					copy[k] = mask
+				}
+			default:
+				copy[k] = v
+			}
+		}
+		clean["streamSettings"] = copy
+	}
+	return clean
+}
+
+func sanitizedFinalMask(value any) map[string]any {
+	mask, _ := value.(map[string]any)
+	if mask == nil {
+		return nil
+	}
+	result := map[string]any{}
+	if udp, ok := mask["udp"].([]any); ok && len(udp) > 0 {
+		result["udp"] = udp
+	}
+	if quic, ok := mask["quicParams"].(map[string]any); ok {
+		result["quicParams"] = quic
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func parseURI(raw string) (Profile, error) {
 	u, e := url.Parse(raw)
 	if e != nil || u.User == nil || u.Hostname() == "" {
@@ -374,8 +537,13 @@ func parseURI(raw string) (Profile, error) {
 	}
 	q := u.Query()
 	if u.Scheme == "hysteria2" || u.Scheme == "hy2" {
-		if q.Get("obfs") != "" || q.Get("obfs-password") != "" {
-			return Profile{}, errors.New("Hysteria2 obfs пока не поддерживается")
+		obfs := strings.ToLower(strings.TrimSpace(q.Get("obfs")))
+		obfsPassword := q.Get("obfs-password")
+		if obfs != "" && obfs != "none" && obfs != "salamander" {
+			return Profile{}, fmt.Errorf("Hysteria2 obfs %s не поддерживается; доступен salamander", obfs)
+		}
+		if obfs == "salamander" && obfsPassword == "" {
+			return Profile{}, errors.New("Для Hysteria2 obfs salamander нужен obfs-password")
 		}
 		password := u.User.Username()
 		if suffix, exists := u.User.Password(); exists {
@@ -412,6 +580,12 @@ func parseURI(raw string) (Profile, error) {
 			"security":         "tls",
 			"tlsSettings":      tlsSettings,
 			"hysteriaSettings": map[string]any{"version": 2, "auth": password},
+		}
+		if obfs == "salamander" {
+			stream["finalmask"] = map[string]any{"udp": []any{map[string]any{
+				"type":     "salamander",
+				"settings": map[string]any{"password": obfsPassword},
+			}}}
 		}
 		out := map[string]any{
 			"tag":            "proxy",
@@ -525,6 +699,85 @@ func validGeoDataTag(value string) bool {
 	return true
 }
 
+// splitRoutingRules accepts one rule per line; lines that are not regexp: may
+// also hold several rules separated by commas or spaces. A regexp keeps its
+// whole line because commas are part of the syntax ({2,3}).
+func splitRoutingRules(lines []string) []string {
+	var rules []string
+	for _, raw := range lines {
+		for _, line := range strings.Split(strings.ReplaceAll(raw, "\r", "\n"), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(line), "regexp:") {
+				rules = append(rules, line)
+				continue
+			}
+			rules = append(rules, strings.Fields(strings.ReplaceAll(line, ",", " "))...)
+		}
+	}
+	return rules
+}
+
+// Xray matches sniffed and resolved names in their ASCII (punycode) form, so
+// Cyrillic rules such as "домен.рф" must be stored as "xn--d1acufc.xn--p1ai".
+func asciiRoutingDomain(value string) (string, error) {
+	value = strings.ToLower(value)
+	if isASCII(value) {
+		return value, nil
+	}
+	converted, err := idna.Lookup.ToASCII(value)
+	if err != nil {
+		converted, err = idna.Punycode.ToASCII(value)
+	}
+	if err != nil {
+		return "", errors.New("Правило маршрутизации содержит недопустимый домен")
+	}
+	return converted, nil
+}
+
+// asciiRoutingRegexp converts every run of non-ASCII letters (a whole label
+// such as "рф" in ".*\.рф$") to punycode and checks that the result compiles
+// with the same RE2 engine Xray uses.
+func asciiRoutingRegexp(value string) (string, error) {
+	if !isASCII(value) {
+		var builder strings.Builder
+		runes := []rune(value)
+		for index := 0; index < len(runes); {
+			if runes[index] < 128 {
+				builder.WriteRune(runes[index])
+				index++
+				continue
+			}
+			end := index
+			for end < len(runes) && (runes[end] >= 128 || runes[end] == '-' || (runes[end] >= '0' && runes[end] <= '9')) {
+				end++
+			}
+			label, err := idna.Punycode.ToASCII(strings.ToLower(string(runes[index:end])))
+			if err != nil {
+				return "", errors.New("Правило regexp: содержит недопустимые символы")
+			}
+			builder.WriteString(regexp.QuoteMeta(label))
+			index = end
+		}
+		value = builder.String()
+	}
+	if _, err := regexp.Compile(value); err != nil {
+		return "", errors.New("Правило regexp: содержит некорректное регулярное выражение")
+	}
+	return value, nil
+}
+
+func isASCII(value string) bool {
+	for index := 0; index < len(value); index++ {
+		if value[index] >= 128 {
+			return false
+		}
+	}
+	return true
+}
+
 func newRoutingOptions(mode string, directDomains []string, geoIPURL, geoSiteURL string) (routingOptions, error) {
 	if mode == "" {
 		mode = "full"
@@ -541,66 +794,74 @@ func newRoutingOptions(mode string, directDomains []string, geoIPURL, geoSiteURL
 	seen := make(map[string]struct{}, len(directDomains))
 	needsGeoIP := false
 	needsGeoSite := false
-	for _, raw := range directDomains {
-		for _, item := range strings.Fields(strings.ReplaceAll(raw, ",", "\n")) {
-			item = strings.TrimSpace(item)
-			if item == "" {
-				continue
+	for _, item := range splitRoutingRules(directDomains) {
+		if len(item) > 255 || strings.ContainsAny(item, "\"'") {
+			return routingOptions{}, errors.New("Правило маршрутизации содержит недопустимый домен")
+		}
+		if strings.Contains(item, "\\") && !strings.HasPrefix(strings.ToLower(item), "regexp:") {
+			return routingOptions{}, errors.New("Обратная косая черта допустима только в правилах regexp:")
+		}
+		lowerItem := strings.ToLower(item)
+		if strings.HasPrefix(lowerItem, "geoip:") {
+			value := strings.TrimSpace(item[len("geoip:"):])
+			if !validGeoDataTag(value) {
+				return routingOptions{}, errors.New("Правило geoip: содержит недопустимое имя списка")
 			}
-			if len(item) > 255 || strings.ContainsAny(item, "\\\"'") {
-				return routingOptions{}, errors.New("Правило маршрутизации содержит недопустимый домен")
+			normalizedItem := "geoip:" + strings.ToLower(value)
+			if _, exists := seen[normalizedItem]; !exists {
+				seen[normalizedItem] = struct{}{}
+				ipRules = append(ipRules, normalizedItem)
+				needsGeoIP = true
 			}
-			lowerItem := strings.ToLower(item)
-			if strings.HasPrefix(lowerItem, "geoip:") {
-				value := strings.TrimSpace(item[len("geoip:"):])
-				if !validGeoDataTag(value) {
-					return routingOptions{}, errors.New("Правило geoip: содержит недопустимое имя списка")
-				}
-				normalizedItem := "geoip:" + strings.ToLower(value)
-				if _, exists := seen[normalizedItem]; !exists {
-					seen[normalizedItem] = struct{}{}
-					ipRules = append(ipRules, normalizedItem)
-					needsGeoIP = true
-				}
-				if len(normalized)+len(ipRules) > 512 {
-					return routingOptions{}, errors.New("Можно добавить не больше 512 правил маршрутизации")
-				}
-				continue
+			if len(normalized)+len(ipRules) > 512 {
+				return routingOptions{}, errors.New("Можно добавить не больше 512 правил маршрутизации")
 			}
-			prefix := "domain:"
-			value := item
-			for _, candidate := range []string{"domain:", "full:", "keyword:", "regexp:", "geosite:"} {
-				if strings.HasPrefix(strings.ToLower(value), candidate) {
-					prefix = candidate
-					value = value[len(candidate):]
-					break
-				}
+			continue
+		}
+		prefix := "domain:"
+		value := item
+		for _, candidate := range []string{"domain:", "full:", "keyword:", "regexp:", "geosite:"} {
+			if strings.HasPrefix(strings.ToLower(value), candidate) {
+				prefix = candidate
+				value = value[len(candidate):]
+				break
 			}
-			value = strings.TrimSpace(value)
-			if value == "" || strings.ContainsAny(value, " \t\r\n") {
-				return routingOptions{}, errors.New("Правило маршрутизации содержит пустой или недопустимый домен")
+		}
+		value = strings.TrimSpace(value)
+		if value == "" || strings.ContainsAny(value, " \t\r\n") {
+			return routingOptions{}, errors.New("Правило маршрутизации содержит пустой или недопустимый домен")
+		}
+		if prefix == "geosite:" {
+			if !validGeoDataTag(value) {
+				return routingOptions{}, errors.New("Правило geosite: содержит недопустимое имя списка")
 			}
-			if prefix == "geosite:" {
-				if !validGeoDataTag(value) {
-					return routingOptions{}, errors.New("Правило geosite: содержит недопустимое имя списка")
-				}
-				value = strings.ToLower(value)
-				needsGeoSite = true
-			} else if prefix == "domain:" {
-				value = strings.TrimSuffix(strings.ToLower(value), ".")
+			value = strings.ToLower(value)
+			needsGeoSite = true
+		} else if prefix == "regexp:" {
+			var ruleErr error
+			if value, ruleErr = asciiRoutingRegexp(value); ruleErr != nil {
+				return routingOptions{}, ruleErr
+			}
+		} else {
+			var ruleErr error
+			if value, ruleErr = asciiRoutingDomain(value); ruleErr != nil {
+				return routingOptions{}, ruleErr
+			}
+			if prefix == "domain:" {
+				value = strings.TrimSuffix(value, ".")
 				if strings.Contains(value, "/") || strings.Contains(value, ":") || !strings.Contains(value, ".") {
 					return routingOptions{}, errors.New("Укажите домен вроде example.com или используйте full:/keyword:")
 				}
 			}
-			normalizedItem := prefix + value
-			if _, exists := seen[normalizedItem]; exists {
-				continue
-			}
-			seen[normalizedItem] = struct{}{}
-			normalized = append(normalized, normalizedItem)
-			if len(normalized)+len(ipRules) > 512 {
-				return routingOptions{}, errors.New("Можно добавить не больше 512 правил маршрутизации")
-			}
+		}
+		normalizedItem := prefix + value
+		if _, exists := seen[normalizedItem]; exists {
+			continue
+		}
+		seen[normalizedItem] = struct{}{}
+		normalized = append(normalized, normalizedItem)
+		if len(normalized)+len(ipRules) > 512 {
+			return routingOptions{}, errors.New("Можно добавить не больше 512 правил маршрутизации")
 		}
 	}
 	if len(normalized)+len(ipRules) == 0 {
@@ -747,17 +1008,20 @@ func configuredOutbound(p Profile, tag string, fragmentation bool) (map[string]a
 			stream = map[string]any{}
 			outbound["streamSettings"] = stream
 		}
-		stream["finalmask"] = map[string]any{
-			"tcp": []any{map[string]any{
-				"type": "fragment",
-				"settings": map[string]any{
-					"packets":  "tlshello",
-					"length":   "10-35",
-					"delay":    "0-1",
-					"maxSplit": "3-5",
-				},
-			}},
+		mask, _ := stream["finalmask"].(map[string]any)
+		if mask == nil {
+			mask = map[string]any{}
+			stream["finalmask"] = mask
 		}
+		mask["tcp"] = []any{map[string]any{
+			"type": "fragment",
+			"settings": map[string]any{
+				"packets":  "tlshello",
+				"length":   "10-35",
+				"delay":    "0-1",
+				"maxSplit": "3-5",
+			},
+		}}
 	}
 	return outbound, nil
 }

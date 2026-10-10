@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	neturl "net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -189,7 +188,7 @@ func (w *worker) closeTunnel(preserveKillSwitch bool) error {
 	}
 	v := w.instance
 	w.instance = nil
-	closeErr = v.Close()
+	closeErr = w.closeInstance(v)
 	if w.killSwitch != nil && !preserveKillSwitch {
 		w.logf("disabling kill switch WFP policy")
 		closeErr = errors.Join(closeErr, w.killSwitch.Close())
@@ -200,6 +199,46 @@ func (w *worker) closeTunnel(preserveKillSwitch bool) error {
 
 func (w *worker) close() error {
 	return w.closeTunnel(false)
+}
+
+// Xray's TUN teardown can block inside Wintun/gVisor. A blocked worker would
+// keep the adapter, its routes and the WFP session alive until a reboot, so a
+// hung close terminates the core instead: Windows then releases the
+// process-owned Wintun adapter and the dynamic WFP session, and the desktop
+// shell starts a fresh core on the next request.
+const tunnelCloseTimeout = 15 * time.Second
+
+var exitProcess = os.Exit
+
+func (w *worker) closeInstance(instance *core.Instance) error {
+	done := make(chan error, 1)
+	go func() { done <- instance.Close() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(tunnelCloseTimeout):
+		w.logf("Xray close did not finish within %s; terminating core so Windows releases TUN and WFP", tunnelCloseTimeout)
+		if w.killSwitch != nil {
+			_ = w.killSwitch.Close()
+			w.killSwitch = nil
+		}
+		w.send(map[string]any{"event": "state", "state": "disconnected"})
+		exitProcess(3)
+		return errors.New("Xray close timed out")
+	}
+}
+
+// shutdown closes the tunnel with a hard deadline so the process can never
+// outlive the desktop shell while holding network state.
+func (w *worker) shutdown() {
+	watchdog := time.AfterFunc(tunnelCloseTimeout+5*time.Second, func() {
+		w.logf("shutdown did not finish in time; forcing exit")
+		exitProcess(4)
+	})
+	defer watchdog.Stop()
+	if err := w.close(); err != nil {
+		w.logf("shutdown cleanup failed: %v", err)
+	}
 }
 func profilesByID(profiles []Profile, ids []string) []Profile {
 	if len(ids) == 0 {
@@ -476,6 +515,14 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 	}
 	return nil
 }
+func normalizedSyncTrigger(reason string) string {
+	switch reason {
+	case "startup", "automatic", "cache":
+		return reason
+	}
+	return "manual"
+}
+
 func main() {
 	enc := json.NewEncoder(os.Stdout)
 	// Reserve stdout exclusively for JSON IPC; core diagnostics must never corrupt it.
@@ -484,12 +531,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	w := &worker{enc: enc, state: "disconnected", diag: diag}
-	defer w.close()
+	defer w.shutdown()
 	w.logf("Go core started version=%s os=%s arch=%s pid=%d", core.Version(), runtime.GOOS, runtime.GOARCH, os.Getpid())
-	if err := cleanupStaleKillSwitch(); err != nil {
-		w.logf("stale kill switch cleanup failed: %v", err)
+	if err := cleanupStaleNetworkState(w.logf); err != nil {
+		w.logf("stale network state cleanup failed: %v", err)
 	} else {
-		w.logf("stale kill switch state checked")
+		w.logf("stale network state checked")
 	}
 	requests := make(chan request)
 	go func() {
@@ -537,35 +584,26 @@ func main() {
 				}(r.ID, r.Masked)
 				continue
 			case "import":
-				trigger := r.Reason
-				if trigger != "startup" && trigger != "automatic" {
-					trigger = "manual"
-				}
-				host := "invalid"
-				if parsed, parseErr := neturl.Parse(r.URL); parseErr == nil {
-					host = parsed.Hostname()
-				}
-				w.logf("subscription sync started trigger=%s host=%s", trigger, host)
+				trigger := normalizedSyncTrigger(r.Reason)
+				w.logf("subscription sync started trigger=%s host=%s", trigger, subscriptionHost(r.URL))
 				if w.instance != nil {
 					err = errors.New("Отключите VPN перед обновлением подписки")
 				} else {
 					var ps []Profile
 					var skipped int
 					var metadata subscriptionMetadata
-					ps, skipped, metadata, err = fetchSubscription(ctx, r.URL)
+					var cached bool
+					ps, skipped, metadata, cached, err = fetchSubscription(ctx, r.URL, trigger == "cache", w.logf)
 					if err == nil {
 						w.profiles = ps
-						result = map[string]any{"profiles": profilesForRenderer(ps), "skipped": skipped, "metadata": metadata}
-						w.logf("subscription sync completed profiles=%d skipped_unsupported=%d", len(ps), skipped)
+						result = map[string]any{"profiles": profilesForRenderer(ps), "skipped": skipped, "metadata": metadata, "cached": cached}
+						w.logf("subscription sync completed profiles=%d skipped_unsupported=%d cached=%t", len(ps), skipped, cached)
 					} else {
 						w.logf("subscription sync failed: %v", err)
 					}
 				}
 			case "importMany":
-				trigger := r.Reason
-				if trigger != "startup" && trigger != "automatic" {
-					trigger = "manual"
-				}
+				trigger := normalizedSyncTrigger(r.Reason)
 				w.logf("subscription batch sync started trigger=%s sources=%d", trigger, len(r.URLs))
 				if len(r.URLs) == 0 || len(r.URLs) > 16 {
 					err = errors.New("Добавьте от 1 до 16 подписок")
@@ -575,17 +613,19 @@ func main() {
 					var ps []Profile
 					var sources []subscriptionSourceStatus
 					var skipped int
-					ps, sources, skipped, err = fetchSubscriptions(ctx, r.URLs)
+					ps, sources, skipped, err = fetchSubscriptions(ctx, r.URLs, trigger == "cache", w.logf)
 					if err == nil {
 						w.profiles = ps
 						result = map[string]any{"profiles": profilesForRenderer(ps), "skipped": skipped, "sources": sources}
-						failed := 0
+						failed, cached := 0, 0
 						for _, source := range sources {
 							if source.Error != "" {
 								failed++
+							} else if source.Cached {
+								cached++
 							}
 						}
-						w.logf("subscription batch sync completed sources=%d failed=%d profiles=%d skipped_unsupported=%d", len(sources), failed, len(ps), skipped)
+						w.logf("subscription batch sync completed sources=%d failed=%d cached=%d profiles=%d skipped_unsupported=%d", len(sources), failed, cached, len(ps), skipped)
 					} else {
 						w.logf("subscription batch sync failed: %v", err)
 					}
@@ -652,7 +692,7 @@ func main() {
 				}
 			case "shutdown":
 				w.logf("application shutdown requested")
-				_ = w.close()
+				w.shutdown()
 				w.send(map[string]any{"id": r.ID, "ok": true})
 				return
 			default:

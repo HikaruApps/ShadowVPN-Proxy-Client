@@ -32,23 +32,36 @@ type pingOptions struct {
 }
 
 func endpointFromOutbound(out map[string]any) (string, int) {
-	settings, _ := out["settings"].(map[string]any)
-	protocol, _ := out["protocol"].(string)
-	if protocol == "hysteria" {
-		address, _ := settings["address"].(string)
-		return address, integerValue(settings["port"])
+	server := outboundServer(out)
+	if server == nil {
+		return "", 0
 	}
+	address, _ := server["address"].(string)
+	return address, integerValue(server["port"])
+}
+
+// outboundServer returns the object that holds address/port. Xray accepts both
+// the flat form (settings.address, used by hysteria and newer Xray JSON
+// exports such as Remnawave) and the legacy vnext/servers arrays.
+func outboundServer(out map[string]any) map[string]any {
+	settings, _ := out["settings"].(map[string]any)
+	if settings == nil {
+		return nil
+	}
+	if _, flat := settings["address"]; flat {
+		return settings
+	}
+	protocol, _ := out["protocol"].(string)
 	key := "servers"
 	if protocol == "vless" || protocol == "vmess" {
 		key = "vnext"
 	}
 	raw, _ := settings[key].([]any)
 	if len(raw) == 0 {
-		return "", 0
+		return nil
 	}
 	server, _ := raw[0].(map[string]any)
-	address, _ := server["address"].(string)
-	return address, integerValue(server["port"])
+	return server
 }
 
 func integerValue(value any) int {

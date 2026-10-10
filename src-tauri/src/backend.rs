@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, VecDeque},
     io::{BufRead, BufReader, Write},
     path::Path,
-    process::{ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Condvar, Mutex,
@@ -19,6 +19,9 @@ type LogCallback = Arc<dyn Fn(String) + Send + Sync>;
 type ProfileCallback = Arc<dyn Fn(Value) + Send + Sync>;
 type TrafficCallback = Arc<dyn Fn(Value) + Send + Sync>;
 const MAX_LOG_LINES: usize = 1500;
+// The Go core arms its own 20 s exit watchdog when stdin closes; give it a
+// little longer before terminating it from here.
+const GRACEFUL_EXIT: Duration = Duration::from_secs(25);
 
 pub struct Backend {
     stdin: Mutex<Option<ChildStdin>>,
@@ -26,6 +29,7 @@ pub struct Backend {
     next_id: AtomicU64,
     busy: AtomicBool,
     finished: Arc<(Mutex<bool>, Condvar)>,
+    child: Arc<Mutex<Child>>,
     logs: LogBuffer,
     pub state: Arc<Mutex<String>>,
 }
@@ -102,6 +106,36 @@ fn normalized_traffic(value: &Value) -> Option<Value> {
     }))
 }
 
+/// A core that hung (or whose parent crashed) keeps the Wintun adapter and the
+/// Kill Switch WFP session alive, which blocks all traffic for the new core
+/// until a reboot. The app is single-instance, so any running core is stale.
+#[cfg(windows)]
+pub fn terminate_stale_cores(executable: &Path) -> bool {
+    use std::os::windows::process::CommandExt;
+    let Some(name) = executable.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let killed = Command::new("taskkill")
+        .args(["/F", "/T", "/IM", name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(0x08000000)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if killed {
+        // Let Windows tear down the process-owned adapter and WFP session.
+        thread::sleep(Duration::from_millis(800));
+    }
+    killed
+}
+
+#[cfg(not(windows))]
+pub fn terminate_stale_cores(_executable: &Path) -> bool {
+    false
+}
+
 impl Backend {
     pub fn spawn(
         executable: &Path,
@@ -109,6 +143,7 @@ impl Backend {
         on_profile: impl Fn(Value) + Send + Sync + 'static,
         on_traffic: impl Fn(Value) + Send + Sync + 'static,
         on_log: impl Fn(String) + Send + Sync + 'static,
+        on_exit: impl Fn() + Send + Sync + 'static,
     ) -> Result<Arc<Self>, String> {
         let mut command = Command::new(executable);
         command
@@ -128,6 +163,7 @@ impl Backend {
         let stdout = child.stdout.take().ok_or("Нет канала ответов ядра")?;
         let stderr = child.stderr.take().ok_or("Нет канала журналов ядра")?;
         let process_id = child.id();
+        let child = Arc::new(Mutex::new(child));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let state = Arc::new(Mutex::new("disconnected".to_string()));
         let finished = Arc::new((Mutex::new(false), Condvar::new()));
@@ -139,6 +175,7 @@ impl Backend {
             next_id: AtomicU64::new(1),
             busy: AtomicBool::new(false),
             finished: finished.clone(),
+            child: child.clone(),
             logs: logs.clone(),
             state: state.clone(),
         });
@@ -212,7 +249,15 @@ impl Backend {
         let exit_logs = logs.clone();
         let exit_callback = log_callback.clone();
         thread::spawn(move || {
-            let status = child.wait();
+            // Poll instead of blocking in wait() so shutdown can still kill the child.
+            let status = loop {
+                match child.lock().unwrap().try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) => {}
+                    Err(error) => break Err(error),
+                }
+                thread::sleep(Duration::from_millis(100));
+            };
             record_log(
                 &exit_logs,
                 &exit_callback,
@@ -221,6 +266,7 @@ impl Backend {
             let (done, signal) = &*finished;
             *done.lock().unwrap() = true;
             signal.notify_all();
+            on_exit();
         });
         Ok(backend)
     }
@@ -254,7 +300,14 @@ impl Backend {
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id);
                 self.stdin.lock().unwrap().take();
-                Err("Ядро не ответило вовремя и завершает работу. Перезапустите приложение".into())
+                let finished = self.finished.clone();
+                let child = self.child.clone();
+                thread::spawn(move || {
+                    if !wait_finished(&finished, GRACEFUL_EXIT) {
+                        let _ = child.lock().unwrap().kill();
+                    }
+                });
+                Err("Ядро не ответило вовремя и будет перезапущено. Повторите действие".into())
             }
         }
     }
@@ -275,25 +328,54 @@ impl Backend {
         self.logs.lock().unwrap().iter().cloned().collect()
     }
 
+    /// Carries the diagnostic log over to a restarted core.
+    pub fn prepend_logs(&self, lines: Vec<String>) {
+        let mut buffer = self.logs.lock().unwrap();
+        for line in lines.into_iter().rev() {
+            if buffer.len() >= MAX_LOG_LINES {
+                break;
+            }
+            buffer.push_front(line);
+        }
+    }
+
     pub fn clear_logs(&self) {
         self.logs.lock().unwrap().clear();
+    }
+
+    pub fn is_finished(&self) -> bool {
+        *self.finished.0.lock().unwrap()
     }
 
     pub fn shutdown(&self) -> Result<(), String> {
         // Closing stdin triggers context cancellation + Xray.Close in the Go worker.
         self.stdin.lock().unwrap().take();
-        let (done, signal) = &*self.finished;
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let mut complete = done.lock().unwrap();
-        while !*complete {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err("Ядро ещё останавливается. Подождите и закройте окно повторно".into());
-            }
-            complete = signal.wait_timeout(complete, remaining).unwrap().0;
+        if wait_finished(&self.finished, GRACEFUL_EXIT) {
+            return Ok(());
         }
-        Ok(())
+        // A core that cannot stop would keep TUN and WFP state; terminating it
+        // lets Windows release both instead of leaving them until a reboot.
+        let _ = self.child.lock().unwrap().kill();
+        if wait_finished(&self.finished, Duration::from_secs(5)) {
+            Ok(())
+        } else {
+            Err("Ядро не удалось остановить. Выполните stop-shadowvpn.cmd".into())
+        }
     }
+}
+
+fn wait_finished(finished: &(Mutex<bool>, Condvar), timeout: Duration) -> bool {
+    let (done, signal) = finished;
+    let deadline = Instant::now() + timeout;
+    let mut complete = done.lock().unwrap();
+    while !*complete {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        complete = signal.wait_timeout(complete, remaining).unwrap().0;
+    }
+    true
 }
 
 #[cfg(all(test, unix))]
@@ -346,6 +428,7 @@ mod tests {
                 *traffic_callback.lock().unwrap() = sample;
             },
             |_| {},
+            || {},
         )
         .unwrap();
         assert_eq!(backend.request("test", json!({})).unwrap()["value"], 42);
