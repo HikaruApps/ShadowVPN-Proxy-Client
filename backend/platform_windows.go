@@ -207,22 +207,31 @@ func interfaceDialer(interfaceName string, timeout time.Duration) (*net.Dialer, 
 	return dialer, nil
 }
 
-// Version 0.8 used a second Wintun adapter as a route guard. Remove any
-// leftover routes once during migration; current WFP sessions are dynamic and
-// Windows removes their filters automatically when shadowvpn-core exits.
-func cleanupStaleKillSwitch() error {
-	adapter, err := wintun.OpenAdapter(legacyKillSwitchAdapterName)
-	if err != nil {
-		return nil
+// cleanupStaleNetworkState runs once when the core starts. At that point this
+// process owns no adapter, so any "ShadowVPN" adapter is left over from a core
+// that crashed or was killed while connected. Its split default routes
+// (0.0.0.0/1, 128.0.0.0/1, ::/1, 8000::/1) and DNS would black-hole all
+// traffic, including the subscription download, until a reboot. Version 0.8
+// also used a second Wintun adapter as a route guard; it is flushed the same
+// way. Current WFP sessions are dynamic and die with their process.
+func cleanupStaleNetworkState(logf func(string, ...any)) error {
+	var result error
+	for _, name := range []string{tunnelAdapterName, legacyKillSwitchAdapterName} {
+		adapter, err := wintun.OpenAdapter(name)
+		if err != nil {
+			continue
+		}
+		logf("stale adapter found name=%q; flushing its routes, addresses and DNS", name)
+		luid := winipcfg.LUID(adapter.LUID())
+		result = errors.Join(result,
+			luid.FlushRoutes(windows.AF_INET),
+			luid.FlushRoutes(windows.AF_INET6),
+			luid.FlushIPAddresses(windows.AF_INET),
+			luid.FlushIPAddresses(windows.AF_INET6),
+			luid.FlushDNS(windows.AF_INET),
+			luid.FlushDNS(windows.AF_INET6),
+			adapter.Close(),
+		)
 	}
-	luid := winipcfg.LUID(adapter.LUID())
-	flushErr := errors.Join(
-		luid.FlushRoutes(windows.AF_INET),
-		luid.FlushRoutes(windows.AF_INET6),
-		luid.FlushIPAddresses(windows.AF_INET),
-		luid.FlushIPAddresses(windows.AF_INET6),
-		luid.FlushDNS(windows.AF_INET),
-		luid.FlushDNS(windows.AF_INET6),
-	)
-	return errors.Join(flushErr, adapter.Close())
+	return result
 }

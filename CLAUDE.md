@@ -25,7 +25,7 @@ The full build only works on Windows (MSVC Rust, Go 1.27+, Node LTS, VS C++ Buil
 Tests:
 
 ```powershell
-cd backend; go test ./...                          # Go: needs GOOS=windows (several symbols exist only in *_windows.go)
+cd backend; go test ./...                          # Go: runs on any OS (Windows-only code has *_other.go stubs)
 go test -run TestName ./...                        # single Go test
 cd src-tauri; cargo test --no-default-features --lib   # Rust: tests backend.rs/settings.rs without Tauri (lib.rs exposes only those)
 node scripts/test-bridge.cjs                       # run from repo root
@@ -33,7 +33,7 @@ node scripts/test-renderer-helpers.cjs
 node scripts/test-subscription-store.cjs
 ```
 
-On Linux the JS tests run as-is. For Go, use `GOOS=windows go vet ./...` / `GOOS=windows go test -c` to type-check, because the tests themselves can't execute there. The JS tests load renderer files into `node:vm` with stubbed `window`, `localStorage` and `__TAURI__`. A renderer module is only testable if it attaches its API to `window.*` and avoids top-level DOM access.
+On Linux, also run `GOOS=windows go vet ./...` to type-check the Windows-only files. `cargo check` of the Tauri binary on Linux needs the GTK/WebKit dev packages and a placeholder `bin/shadowvpn-core.exe` (it is a bundle resource). The JS tests load renderer files into `node:vm` with stubbed `window`, `localStorage` and `__TAURI__`. A renderer module is only testable if it attaches its API to `window.*` and avoids top-level DOM access.
 
 ## Architecture
 
@@ -45,6 +45,14 @@ On Linux the JS tests run as-is. For Go, use `GOOS=windows go vet ./...` / `GOOS
 **Adding a backend operation** means touching every layer: a Go `case` in `main.go`, a `#[tauri::command]` registered in `main.rs` (with input validation, since Rust and Go each validate independently, e.g. DNS and GeoData URLs), and a wrapper in `tauri-bridge.js` (plus its assertion in `scripts/test-bridge.cjs`).
 
 **Credential isolation:** server URIs, UUIDs and passwords stay inside the Go process. The WebView sees only name, protocol, transport and a random, stable profile ID. Connect calls pass profile IDs (and `autoProfileIds` for Auto or groups). Log lines are redacted in both Go and Rust (`sanitize_log_line`) before they reach the UI. Keep it this way.
+
+**Subscription cache:** Go keeps the last good body of each subscription (`backend/subscription_cache.go`, DPAPI-sealed under `%LOCALAPPDATA%\ShadowVPN\subscriptions`). The sync `reason` controls it. `cache` is cache-first and downloads only sources that have no saved copy. `startup`, `manual` and `automatic` are network-first and fall back to the saved copy (`sources[].cached`). At startup the renderer uses `cache` unless auto-update is on and its interval has elapsed. A load served from the cache does not reset the last-sync time.
+
+**Core lifecycle and recovery:** a hung or orphaned core keeps the `ShadowVPN` Wintun adapter and the Kill Switch WFP session alive, which used to block all traffic until a reboot. Several layers guard against that:
+- `Service` in `main.rs` kills stale `shadowvpn-core.exe` processes before spawning.
+- After a crash, a request timeout or the core's own exit, `Service` respawns the core on the next call and emits `vpn:core-exited`. The renderer then reloads servers with `reason: "cache"`.
+- `Backend::shutdown` kills the child if it doesn't exit within 25 s.
+- In Go, `closeInstance` exits the process if `instance.Close()` hangs for 15 s, `shutdown` has a 20 s watchdog, and `cleanupStaleNetworkState` flushes routes and DNS on a leftover adapter at startup.
 
 **UI state** (subscriptions, groups, settings) lives in WebView `localStorage` through `subscription-store.js`, `group-store.js` and `settings-store.js`. Those stores include migration logic from earlier storage formats.
 

@@ -145,10 +145,45 @@ func subscriptionMetadataFromHeaders(header http.Header) subscriptionMetadata {
 	}
 }
 
-func fetchSubscription(ctx context.Context, address string) ([]Profile, int, subscriptionMetadata, error) {
+type subscriptionLogf func(format string, values ...any)
+
+func subscriptionHost(address string) string {
+	if parsed, err := url.Parse(address); err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	return "invalid"
+}
+
+func validSubscriptionURL(address string) bool {
 	u, e := url.Parse(address)
-	if e != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
-		return nil, 0, subscriptionMetadata{}, errors.New("Нужна HTTPS-ссылка на подписку")
+	return e == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil
+}
+
+// downloadSubscription retries once: right after login, resume or a TUN
+// teardown Windows often needs a moment before DNS and routes settle.
+func downloadSubscription(ctx context.Context, address string, logf subscriptionLogf) ([]byte, subscriptionMetadata, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 2; attempt++ {
+		body, metadata, retry, err := downloadSubscriptionOnce(ctx, address, logf)
+		if err == nil {
+			return body, metadata, nil
+		}
+		lastErr = err
+		if !retry || attempt == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, subscriptionMetadata{}, lastErr
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+	return nil, subscriptionMetadata{}, lastErr
+}
+
+func downloadSubscriptionOnce(ctx context.Context, address string, logf subscriptionLogf) ([]byte, subscriptionMetadata, bool, error) {
+	if !validSubscriptionURL(address) {
+		return nil, subscriptionMetadata{}, false, errors.New("Нужна HTTPS-ссылка на подписку")
 	}
 	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 		if len(via) >= 5 || r.URL.Scheme != "https" || r.URL.User != nil {
@@ -156,31 +191,91 @@ func fetchSubscription(ctx context.Context, address string) ([]Profile, int, sub
 		}
 		return nil
 	}}
-	req, e := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	defer client.CloseIdleConnections()
+	req, e := http.NewRequestWithContext(ctx, "GET", address, nil)
 	if e != nil {
-		return nil, 0, subscriptionMetadata{}, errors.New("Некорректная ссылка")
+		return nil, subscriptionMetadata{}, false, errors.New("Некорректная ссылка")
 	}
 	setClientIdentityHeaders(req, currentDeviceInfo())
 	req.Header.Set("Accept", "application/json, text/plain;q=0.9")
+	host := subscriptionHost(address)
 	resp, e := client.Do(req)
 	if e != nil {
-		return nil, 0, subscriptionMetadata{}, errors.New("Не удалось загрузить подписку. Проверьте интернет и ссылку")
+		cause, message := subscriptionFetchReason(e)
+		if logf != nil {
+			logf("subscription download failed host=%s cause=%s", host, cause)
+		}
+		return nil, subscriptionMetadata{}, !strings.HasPrefix(cause, "tls:"), errors.New(message)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, 0, subscriptionMetadata{}, fmt.Errorf("Сервер подписки вернул HTTP %d", resp.StatusCode)
+		if logf != nil {
+			logf("subscription download failed host=%s status=%d", host, resp.StatusCode)
+		}
+		return nil, subscriptionMetadata{}, resp.StatusCode >= 500, fmt.Errorf("Сервер подписки вернул HTTP %d", resp.StatusCode)
 	}
 	metadata := subscriptionMetadataFromHeaders(resp.Header)
 	b, e := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
 	if e != nil {
-		return nil, 0, metadata, errors.New("Ошибка чтения подписки")
+		if logf != nil {
+			cause, _ := subscriptionFetchReason(e)
+			logf("subscription read failed host=%s cause=%s", host, cause)
+		}
+		return nil, metadata, true, errors.New("Ошибка чтения подписки")
 	}
 	if len(b) > 4*1024*1024 {
-		return nil, 0, metadata, errors.New("Подписка превышает 4 МБ")
+		return nil, metadata, false, errors.New("Подписка превышает 4 МБ")
 	}
-	skipped := 0
-	profiles, err := parseSubscriptionWithStats(b, &skipped)
-	return profiles, skipped, metadata, err
+	return b, metadata, false, nil
+}
+
+// fetchSubscription loads one source. With preferCache the saved copy is used
+// without touching the network; otherwise the network wins and the saved copy
+// is only a fallback when the download fails.
+func fetchSubscription(ctx context.Context, address string, preferCache bool, logf subscriptionLogf) ([]Profile, int, subscriptionMetadata, bool, error) {
+	if !validSubscriptionURL(address) {
+		return nil, 0, subscriptionMetadata{}, false, errors.New("Нужна HTTPS-ссылка на подписку")
+	}
+	host := subscriptionHost(address)
+	fromCache := func() ([]Profile, int, subscriptionMetadata, bool, error) {
+		cached, err := loadSubscriptionCache(address)
+		if err != nil {
+			return nil, 0, subscriptionMetadata{}, false, err
+		}
+		skipped := 0
+		profiles, err := parseSubscriptionWithStats(cached.Body, &skipped)
+		if err != nil {
+			return nil, 0, subscriptionMetadata{}, false, err
+		}
+		if logf != nil {
+			logf("subscription loaded from cache host=%s saved_at=%s profiles=%d", host, time.Unix(cached.SavedAt, 0).UTC().Format(time.RFC3339), len(profiles))
+		}
+		return profiles, skipped, cached.Metadata, true, nil
+	}
+	if preferCache {
+		if profiles, skipped, metadata, cached, err := fromCache(); err == nil {
+			return profiles, skipped, metadata, cached, nil
+		}
+	}
+	body, metadata, err := downloadSubscription(ctx, address, logf)
+	if err == nil {
+		skipped := 0
+		var profiles []Profile
+		profiles, err = parseSubscriptionWithStats(body, &skipped)
+		if err == nil {
+			if saveErr := saveSubscriptionCache(address, body, metadata); saveErr != nil && logf != nil {
+				logf("subscription cache write failed host=%s: %v", host, saveErr)
+			}
+			return profiles, skipped, metadata, false, nil
+		}
+	}
+	if profiles, skipped, cachedMetadata, cached, cacheErr := fromCache(); cacheErr == nil {
+		if logf != nil {
+			logf("subscription refresh failed, using saved copy host=%s error=%q", host, err.Error())
+		}
+		return profiles, skipped, cachedMetadata, cached, nil
+	}
+	return nil, 0, metadata, false, err
 }
 
 type subscriptionSourceStatus struct {
@@ -188,6 +283,7 @@ type subscriptionSourceStatus struct {
 	Profiles int                  `json:"profiles"`
 	Skipped  int                  `json:"skipped"`
 	Metadata subscriptionMetadata `json:"metadata"`
+	Cached   bool                 `json:"cached,omitempty"`
 	Error    string               `json:"error,omitempty"`
 }
 
@@ -196,6 +292,7 @@ type subscriptionFetchResult struct {
 	profiles []Profile
 	skipped  int
 	metadata subscriptionMetadata
+	cached   bool
 	err      error
 }
 
@@ -214,15 +311,15 @@ func mergeSubscriptionProfiles(profileSets ...[]Profile) []Profile {
 	return merged
 }
 
-func fetchSubscriptions(ctx context.Context, addresses []string) ([]Profile, []subscriptionSourceStatus, int, error) {
+func fetchSubscriptions(ctx context.Context, addresses []string, preferCache bool, logf subscriptionLogf) ([]Profile, []subscriptionSourceStatus, int, error) {
 	results := make([]subscriptionFetchResult, len(addresses))
 	var wait sync.WaitGroup
 	for index, address := range addresses {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			profiles, skipped, metadata, err := fetchSubscription(ctx, address)
-			results[index] = subscriptionFetchResult{index: index, profiles: profiles, skipped: skipped, metadata: metadata, err: err}
+			profiles, skipped, metadata, cached, err := fetchSubscription(ctx, address, preferCache, logf)
+			results[index] = subscriptionFetchResult{index: index, profiles: profiles, skipped: skipped, metadata: metadata, cached: cached, err: err}
 		}()
 	}
 	wait.Wait()
@@ -233,7 +330,7 @@ func fetchSubscriptions(ctx context.Context, addresses []string) ([]Profile, []s
 	successful := 0
 	firstError := ""
 	for _, result := range results {
-		status := subscriptionSourceStatus{Index: result.index, Profiles: len(result.profiles), Skipped: result.skipped, Metadata: result.metadata}
+		status := subscriptionSourceStatus{Index: result.index, Profiles: len(result.profiles), Skipped: result.skipped, Metadata: result.metadata, Cached: result.cached}
 		if result.err != nil {
 			status.Error = result.err.Error()
 			if firstError == "" {

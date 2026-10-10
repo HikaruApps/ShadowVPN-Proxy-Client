@@ -1078,6 +1078,24 @@ function subscriptionSyncSucceeded() {
   writeLastSubscriptionSync();
   scheduleSubscriptionUpdate();
 }
+// Saved copies come from the core's local cache; only a real download counts
+// as a sync, so the auto-update timer keeps its schedule after a cached load.
+function cachedSourceCount(imported) {
+  if (Array.isArray(imported?.sources)) return imported.sources.filter(source => !source?.error && source?.cached).length;
+  return imported?.cached ? 1 : 0;
+}
+function finishSubscriptionLoad(imported) {
+  if (cachedSourceCount(imported)) scheduleSubscriptionUpdate();
+  else subscriptionSyncSucceeded();
+}
+// Startup reads the saved servers; the network is used only when automatic
+// updates are enabled and the interval has elapsed (or nothing is saved yet).
+function startupSubscriptionTrigger() {
+  const interval = autoUpdateIntervalMs();
+  if (!interval) return "cache";
+  const lastSync = readLastSubscriptionSync();
+  return lastSync && Date.now() - lastSync < interval ? "cache" : "startup";
+}
 function updateAutoUpdateControl() {
   autoUpdateSelect.value = selectedAutoUpdate;
   autoUpdateDescription.textContent = selectedAutoUpdate === "off"
@@ -1231,8 +1249,14 @@ async function syncSubscription(trigger = "manual") {
     updateDNSControl();
     const serverCount = serverProfiles.filter(profile => !profile.auto).length;
     const failed = failedSubscriptionCount(imported);
-    statusText.textContent = `Подписки синхронизированы · ${serverCount} серверов${failed ? ` · ошибок: ${failed}` : ""}${imported.skipped ? ` · пропущено: ${imported.skipped}` : ""}`;
-    subscriptionSyncSucceeded();
+    const cached = cachedSourceCount(imported);
+    if (cached) {
+      statusText.textContent = `Не удалось обновить · показаны сохранённые серверы (${serverCount})`;
+      scheduleSubscriptionUpdate(trigger === "automatic" ? 300000 : undefined);
+    } else {
+      statusText.textContent = `Подписки синхронизированы · ${serverCount} серверов${failed ? ` · ошибок: ${failed}` : ""}${imported.skipped ? ` · пропущено: ${imported.skipped}` : ""}`;
+      subscriptionSyncSucceeded();
+    }
   } catch (error) {
     statusText.textContent = error.message || "Не удалось обновить подписку";
     scheduleSubscriptionUpdate(trigger === "automatic" ? 300000 : undefined);
@@ -1257,13 +1281,14 @@ async function importSavedSubscriptions() {
     let restoredAll = false;
     let imported;
     let requestedState = activeSubscriptionState();
+    const trigger = startupSubscriptionTrigger();
     try {
-      imported = await importSubscriptionList(requestedState, "startup");
+      imported = await importSubscriptionList(requestedState, trigger);
     } catch (error) {
       if (!subscriptionState.activeId) throw error;
       const allSubscriptions = { ...subscriptionState, activeId: "" };
       requestedState = activeSubscriptionState(allSubscriptions);
-      imported = await importSubscriptionList(requestedState, "startup");
+      imported = await importSubscriptionList(requestedState, trigger);
       subscriptionState = subscriptionStore.writeState(allSubscriptions);
       restoredAll = true;
     }
@@ -1272,7 +1297,9 @@ async function importSavedSubscriptions() {
     const failed = failedSubscriptionCount(imported);
     if (restoredAll) statusText.textContent = "Выбранная подписка недоступна · показаны все доступные";
     else if (failed) statusText.textContent = `Подписки загружены частично · недоступно: ${failed}`;
-    subscriptionSyncSucceeded();
+    else if (trigger !== "cache" && cachedSourceCount(imported)) statusText.textContent = "Нет связи с сервером подписки · показаны сохранённые серверы";
+    if (trigger !== "cache" && cachedSourceCount(imported)) scheduleSubscriptionUpdate(300000);
+    else finishSubscriptionLoad(imported);
     await openDashboard();
     void loadDirectIp();
     if (pingOnOpenEnabled) window.setTimeout(() => void runPingTest(), 450);
@@ -1386,12 +1413,12 @@ async function selectSubscriptionScope(activeId) {
   updatePingButton();
   try {
     const requestedState = activeSubscriptionState(changedState);
-    const imported = await requestSubscriptionList(requestedState, "manual");
+    const imported = await requestSubscriptionList(requestedState, "cache");
     applyImportedProfiles(imported);
     subscriptionState = subscriptionStore.writeState(stateWithImportedMetadata(changedState, requestedState, imported));
     updateDNSControl();
     renderSubscriptionManager();
-    subscriptionSyncSucceeded();
+    finishSubscriptionLoad(imported);
     const count = serverProfiles.filter(profile => !profile.auto).length;
     const failed = failedSubscriptionCount(imported);
     statusText.textContent = targetId
@@ -1432,7 +1459,8 @@ async function saveManagedSubscription() {
       ? activeSubscriptionState(changed.state)
       : { items: changed.state.items.filter(item => item.id === changedId) };
     const sourceIndex = changed.state.activeId ? 0 : changed.state.items.findIndex(item => item.id === changedId);
-    const imported = await requestSubscriptionList(requestedState, "manual");
+    // A new link has no saved copy, so it is downloaded; the others stay cached.
+    const imported = await requestSubscriptionList(requestedState, edited ? "manual" : "cache");
     const sourceError = imported.sources?.find(source => source.index === sourceIndex)?.error;
     if (sourceError) throw new Error(sourceError);
     if (changedIsVisible) applyImportedProfiles(imported);
@@ -1442,7 +1470,7 @@ async function saveManagedSubscription() {
     editingSubscriptionId = changedId;
     subscriptionUrl.value = subscriptionState.items[0]?.url || "";
     renderSubscriptionManager();
-    subscriptionSyncSucceeded();
+    finishSubscriptionLoad(imported);
     const failed = failedSubscriptionCount(imported);
     statusText.textContent = `${edited ? "Подписка обновлена" : "Подписка добавлена"}${failed ? ` · недоступно других: ${failed}` : ""}`;
   } catch (error) {
@@ -1478,7 +1506,7 @@ async function removeManagedSubscription() {
   updatePingButton();
   try {
     const requestedState = activeSubscriptionState(changedState);
-    const imported = await requestSubscriptionList(requestedState, "manual");
+    const imported = await requestSubscriptionList(requestedState, "cache");
     applyImportedProfiles(imported);
     subscriptionState = subscriptionStore.writeState(stateWithImportedMetadata(changedState, requestedState, imported));
     updateDNSControl();
@@ -1486,7 +1514,7 @@ async function removeManagedSubscription() {
     editingSubscriptionId = subscriptionState.activeId || "";
     subscriptionUrl.value = subscriptionState.items[0].url;
     renderSubscriptionManager();
-    subscriptionSyncSucceeded();
+    finishSubscriptionLoad(imported);
     const failed = failedSubscriptionCount(imported);
     statusText.textContent = `Подписка удалена${failed ? ` · недоступно: ${failed}` : ""}`;
   } catch (error) {
@@ -1500,6 +1528,29 @@ async function removeManagedSubscription() {
 
 document.getElementById("subscriptionForm").addEventListener("submit", event => { event.preventDefault(); void importSubscription("manual"); });
 if (subscriptionState.items.length) void importSavedSubscriptions();
+// A crashed or hung core is replaced by the desktop shell; the new process has
+// no servers yet, so hand it the saved copy without touching the network.
+async function reloadAfterCoreRestart(attempt = 0) {
+  if (!serverProfiles.length || !subscriptionState.items.length) return;
+  if (requestBusy) {
+    if (attempt < 20) window.setTimeout(() => void reloadAfterCoreRestart(attempt + 1), 500);
+    return;
+  }
+  requestBusy = true;
+  try {
+    const imported = await requestSubscriptionList(activeSubscriptionState(), "cache");
+    applyImportedProfiles(imported);
+    statusText.textContent = "Ядро перезапущено после сбоя · сеть очищена";
+  } catch (error) {
+    statusText.textContent = error.message || "Ядро перезапущено · обновите подписку";
+  } finally {
+    requestBusy = false;
+    updatePingButton();
+  }
+}
+window.vpnApi.onCoreRestart(() => {
+  window.setTimeout(() => void reloadAfterCoreRestart(), 400);
+});
 subscriptionUrl.addEventListener("input", () => {
   subscriptionError.textContent = "";
   subscriptionUrl.removeAttribute("aria-invalid");
