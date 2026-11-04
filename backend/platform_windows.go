@@ -215,7 +215,9 @@ func interfaceDialer(interfaceName string, timeout time.Duration) (*net.Dialer, 
 // also used a second Wintun adapter as a route guard; it is flushed the same
 // way. Current WFP sessions are dynamic and die with their process.
 func cleanupStaleNetworkState(logf func(string, ...any)) error {
-	var result error
+	// A core that died in the system-proxy mode left the proxy pointing at a
+	// port nobody listens on, which looks like "no internet" in every browser.
+	result := restoreSystemProxy()
 	for _, name := range []string{tunnelAdapterName, legacyKillSwitchAdapterName} {
 		adapter, err := wintun.OpenAdapter(name)
 		if err != nil {

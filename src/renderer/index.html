@@ -214,12 +214,32 @@
           <input class="sr-only" id="autoStartToggle" type="checkbox" />
           <span class="toggle-track" aria-hidden="true"><span></span></span>
         </label>
+        <label class="setting-card setting-toggle" for="closeToTrayToggle">
+          <span class="setting-copy"><strong>Сворачивать в трей при закрытии</strong><small>Крестик прячет окно, VPN продолжает работать. Выход — через значок в трее</small></span>
+          <input class="sr-only" id="closeToTrayToggle" type="checkbox" />
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+        </label>
         <label class="setting-card setting-toggle" for="pingOnOpenToggle">
           <span class="setting-copy"><strong>Пинговать при открытии приложения</strong><small>Проверять серверы после загрузки подписки</small></span>
           <input class="sr-only" id="pingOnOpenToggle" type="checkbox" />
           <span class="toggle-track" aria-hidden="true"><span></span></span>
         </label>
         <p class="settings-section-title setting-spaced">Сеть</p>
+        <label class="setting-card" for="connectionModeSelect">
+          <span class="setting-copy">
+            <strong>Режим подключения</strong>
+            <small id="connectionModeDescription">Виртуальный адаптер: через VPN идут все программы</small>
+          </span>
+          <span class="select-shell">
+            <select id="connectionModeSelect" aria-label="Режим подключения"></select>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
+          </span>
+        </label>
+        <label class="setting-card setting-toggle" for="autoReconnectToggle">
+          <span class="setting-copy"><strong>Автопереподключение</strong><small>Восстанавливать VPN после сна, смены сети или обрыва связи</small></span>
+          <input class="sr-only" id="autoReconnectToggle" type="checkbox" />
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+        </label>
         <label class="setting-card" for="dnsSelect">
           <span class="setting-copy">
             <strong>DNS внутри VPN</strong>
@@ -255,8 +275,8 @@
         </label>
         <div class="routing-domains" id="routingDomainsFields" hidden>
           <label for="routingDomainsInput">Правила маршрутизации</label>
-          <textarea id="routingDomainsInput" maxlength="12000" rows="5" autocomplete="off" spellcheck="false" placeholder="example.com&#10;geosite:youtube&#10;geoip:ru"></textarea>
-          <small>По одному правилу на строку: домен, full:, keyword:, regexp:, geosite: или geoip:. Кириллические домены (.рф) переводятся в punycode автоматически.</small>
+          <textarea id="routingDomainsInput" maxlength="12000" rows="5" autocomplete="off" spellcheck="false" placeholder="example.com&#10;geosite:youtube&#10;app:steam.exe"></textarea>
+          <small>По одному правилу на строку: домен, full:, keyword:, regexp:, geosite:, geoip: или программа app:steam.exe. Кириллические домены (.рф) переводятся в punycode автоматически.</small>
         </div>
         <div class="routing-geodata" id="routingGeoDataFields" hidden>
           <div class="routing-geodata-heading">

@@ -71,3 +71,10 @@ assert.equal(JSON.parse(storage.getItem(store.storageKey)).items.length, 1);
 assert.equal(storage.getItem(store.legacyStorageKey), 'https://updated.example/sub');
 assert.equal(store.displayHost('https://updated.example/sub'), 'updated.example');
 console.log('Subscription store: migration, validation, add, update, remove passed.');
+
+// The renderer can swap the default storage for the vault-backed one.
+const vault = memoryStorage();
+store.useStorage(vault);
+store.writeState(store.addItem(store.readState(), 'https://vault.example/sub').state);
+assert.equal(JSON.parse(vault.getItem(store.storageKey)).items[0].url, 'https://vault.example/sub');
+

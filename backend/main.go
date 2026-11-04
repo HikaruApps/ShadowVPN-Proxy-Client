@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -43,6 +44,9 @@ type request struct {
 	DirectDomains  []string `json:"directDomains"`
 	GeoIPURL       string   `json:"geoIpUrl"`
 	GeoSiteURL     string   `json:"geoSiteUrl"`
+	ConnectionMode string   `json:"connectionMode"`
+	AutoReconnect  bool     `json:"autoReconnect"`
+	Data           string   `json:"data"`
 }
 
 type connectionInfo struct {
@@ -64,10 +68,20 @@ type worker struct {
 	trafficCancel context.CancelFunc
 	trafficWG     sync.WaitGroup
 	killSwitch    *killSwitchGuard
-	enc           *json.Encoder
-	mu            sync.Mutex
-	state         string
-	diag          *log.Logger
+	// System-proxy mode: puts the user's previous proxy settings back.
+	proxyRestore func() error
+	// Auto-reconnect: the last successful connect request, the tunnel health
+	// monitor, and requests the worker sends to itself.
+	lastConnect      *request
+	healthCancel     context.CancelFunc
+	healthWG         sync.WaitGroup
+	internal         chan request
+	reconnectTimer   *time.Timer
+	reconnectAttempt int
+	enc              *json.Encoder
+	mu               sync.Mutex
+	state            string
+	diag             *log.Logger
 }
 
 func (w *worker) send(v any) { w.mu.Lock(); defer w.mu.Unlock(); _ = w.enc.Encode(v) }
@@ -174,10 +188,16 @@ func (w *worker) startAutoMonitor(parent context.Context, instance *core.Instanc
 	}()
 }
 func (w *worker) closeTunnel(preserveKillSwitch bool) error {
+	w.stopHealthMonitor()
 	w.stopAutoMonitor()
 	w.stopTrafficMonitor()
 	w.clearActiveProfile()
 	var closeErr error
+	if w.proxyRestore != nil {
+		w.logf("restoring the previous system proxy settings")
+		closeErr = w.proxyRestore()
+		w.proxyRestore = nil
+	}
 	if w.instance == nil {
 		if w.killSwitch != nil && !preserveKillSwitch {
 			w.logf("disabling kill switch WFP policy")
@@ -188,7 +208,7 @@ func (w *worker) closeTunnel(preserveKillSwitch bool) error {
 	}
 	v := w.instance
 	w.instance = nil
-	closeErr = w.closeInstance(v)
+	closeErr = errors.Join(closeErr, w.closeInstance(v))
 	if w.killSwitch != nil && !preserveKillSwitch {
 		w.logf("disabling kill switch WFP policy")
 		closeErr = errors.Join(closeErr, w.killSwitch.Close())
@@ -218,6 +238,10 @@ func (w *worker) closeInstance(instance *core.Instance) error {
 		return err
 	case <-time.After(tunnelCloseTimeout):
 		w.logf("Xray close did not finish within %s; terminating core so Windows releases TUN and WFP", tunnelCloseTimeout)
+		if w.proxyRestore != nil {
+			_ = w.proxyRestore()
+			w.proxyRestore = nil
+		}
 		if w.killSwitch != nil {
 			_ = w.killSwitch.Close()
 			w.killSwitch = nil
@@ -257,8 +281,11 @@ func profilesByID(profiles []Profile, ids []string) []Profile {
 	return result
 }
 
-func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoProfileIDs, directDomains []string, dnsDoH, routeMode, geoIPURL, geoSiteURL string, fragmentation, killSwitch bool) error {
-	w.logf("connect requested profile_id=%s", id)
+func (w *worker) connect(ctx context.Context, r request) error {
+	id, dnsID, customDNS, autoProfileIDs, directDomains := r.ProfileID, r.DNS, r.DNSServers, r.AutoProfileIDs, r.DirectDomains
+	dnsDoH, routeMode, geoIPURL, geoSiteURL := r.DNSDoH, r.RouteMode, r.GeoIPURL, r.GeoSiteURL
+	fragmentation, killSwitch := r.Fragment, r.KillSwitch
+	w.logf("connect requested profile_id=%s mode=%s", id, connectionModeName(r.ConnectionMode))
 	validatedDNSID, dns, err := selectedDNSWithDoH(dnsID, customDNS, dnsDoH)
 	if err != nil {
 		w.logf("connect rejected: invalid DNS preset")
@@ -268,6 +295,11 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 	if routingErr != nil {
 		w.logf("connect rejected: invalid routing settings: %v", routingErr)
 		return routingErr
+	}
+	routing.Proxy = r.ConnectionMode == "proxy"
+	if killSwitch && routing.Proxy {
+		w.logf("connect rejected: kill switch needs the TUN mode")
+		return errors.New("Kill Switch работает только в режиме TUN. Выключите его или смените режим подключения")
 	}
 	if killSwitch && routing.Mode != "full" {
 		w.logf("connect rejected: kill switch cannot be combined with split routing mode=%s", routing.Mode)
@@ -337,7 +369,12 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 		return errors.New("Выберите сервер из загруженной подписки")
 	}
 	w.logf("profile selected name=%q protocol=%s transport=%s endpoint=%s", selected.Name, selected.Protocol, selected.Transport, net.JoinHostPort(selected.Address, strconv.Itoa(selected.Port)))
-	if err := checkPlatform(); err != nil {
+	if routing.Proxy {
+		if err := localProxyPortsFree(); err != nil {
+			w.logf("system proxy ports busy: %v", err)
+			return err
+		}
+	} else if err := checkPlatform(); err != nil {
 		w.logf("platform check failed: %v", err)
 		return err
 	}
@@ -482,23 +519,7 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 	// Real TLS request through Xray's dispatcher, not the system's direct connection.
 	probeCtx, cancel := context.WithTimeout(ctx, 24*time.Second)
 	defer cancel()
-	transport := &http.Transport{DialContext: func(c context.Context, network, address string) (net.Conn, error) {
-		dest, e := xnet.ParseDestination("tcp:" + address)
-		if e != nil {
-			return nil, e
-		}
-		return core.Dial(c, instance, dest)
-	}, TLSHandshakeTimeout: 20 * time.Second}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 24 * time.Second}
-	req, _ := http.NewRequestWithContext(probeCtx, "GET", "https://www.gstatic.com/generate_204", nil)
-	resp, e := client.Do(req)
-	if e == nil {
-		_ = resp.Body.Close()
-		if resp.StatusCode != 204 {
-			e = errors.New("unexpected status")
-		}
-	}
+	e = probeThroughInstance(probeCtx, instance, 24*time.Second)
 	if e != nil {
 		w.logf("connectivity probe failed: %v", e)
 		_ = w.close()
@@ -506,12 +527,69 @@ func (w *worker) connect(ctx context.Context, id, dnsID string, customDNS, autoP
 		return errors.New("TUN запущен, но проверка интернета через сервер не прошла. Соединение отключено")
 	}
 	w.logf("connectivity probe passed; tunnel is ready")
+	if routing.Proxy {
+		restore, proxyErr := enableSystemProxy(localHTTPPort, localSocksPort)
+		if proxyErr != nil {
+			w.logf("system proxy activation failed: %v", proxyErr)
+			_ = w.close()
+			w.setState("disconnected")
+			return errors.New("Не удалось включить системный прокси Windows")
+		}
+		w.proxyRestore = restore
+		w.logf("system proxy enabled http=127.0.0.1:%d socks=127.0.0.1:%d", localHTTPPort, localSocksPort)
+	}
 	w.setActiveProfile(*selected)
 	w.setState("connected")
-	w.startTrafficMonitor(ctx, instance)
+	w.startTrafficMonitor(ctx, instance, routing.inboundTags())
 	if isAuto {
 		w.logf("continuous auto fallback active candidates=%d interval=%s", len(autoProfiles), autoProbeInterval)
 		w.startAutoMonitor(ctx, instance, autoProfiles, *selected)
+	}
+	saved := r
+	saved.ID = 0
+	w.lastConnect = &saved
+	if r.AutoReconnect {
+		w.startHealthMonitor(ctx, instance)
+	}
+	return nil
+}
+
+func connectionModeName(mode string) string {
+	if mode == "proxy" {
+		return "proxy"
+	}
+	return "tun"
+}
+
+// instanceDial dials through the running Xray instance, as traffic from the
+// tunnel or the local proxy would go.
+func instanceDial(instance *core.Instance) func(context.Context, string, string) (net.Conn, error) {
+	return func(c context.Context, _ string, address string) (net.Conn, error) {
+		dest, err := xnet.ParseDestination("tcp:" + address)
+		if err != nil {
+			return nil, err
+		}
+		return core.Dial(c, instance, dest)
+	}
+}
+
+// probeThroughInstance makes a real HTTPS request through Xray's dispatcher,
+// not the system's direct connection.
+func probeThroughInstance(ctx context.Context, instance *core.Instance, timeout time.Duration) error {
+	transport := &http.Transport{DialContext: instanceDial(instance), TLSHandshakeTimeout: timeout}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: timeout}
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://www.gstatic.com/generate_204", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -539,13 +617,20 @@ func main() {
 		w.logf("stale network state checked")
 	}
 	requests := make(chan request)
+	w.internal = make(chan request)
 	go func() {
 		defer cancel()
 		scanner := bufio.NewScanner(os.Stdin)
-		scanner.Buffer(make([]byte, 4096), 64*1024)
+		scanner.Buffer(make([]byte, 4096), 1024*1024)
 		for scanner.Scan() {
 			var r request
 			if json.Unmarshal(scanner.Bytes(), &r) != nil {
+				continue
+			}
+			// The settings vault is plain file work: answer it here so a long
+			// connect in the worker loop never delays saving the UI's state.
+			if r.Method == "vaultLoad" || r.Method == "vaultSave" {
+				w.handleVault(r)
 				continue
 			}
 			select {
@@ -561,6 +646,10 @@ func main() {
 		case <-ctx.Done():
 			w.logf("shutdown signal received")
 			return
+		case r := <-w.internal:
+			if r.Method == "reconnect" {
+				w.reconnect(ctx, r.Reason)
+			}
 		case r := <-requests:
 			var result any = map[string]any{}
 			var err error
@@ -569,8 +658,14 @@ func main() {
 				result = currentDeviceInfo()
 			case "publicIp":
 				w.logf("external IPv4 lookup requested masked=%t", r.Masked)
+				// While connected, ask through the tunnel or local proxy: in the
+				// system-proxy mode the core's own sockets bypass the proxy.
+				var dial func(context.Context, string, string) (net.Conn, error)
+				if w.instance != nil {
+					dial = instanceDial(w.instance)
+				}
 				go func(id int, masked bool) {
-					ip, ipErr := publicIPv4(ctx)
+					ip, ipErr := publicIPv4Via(ctx, dial)
 					if ipErr != nil {
 						w.logf("external IPv4 lookup failed: %v", ipErr)
 						w.send(map[string]any{"id": id, "ok": false, "error": ipErr.Error()})
@@ -631,7 +726,11 @@ func main() {
 					}
 				}
 			case "connect":
-				err = w.connect(ctx, r.ProfileID, r.DNS, r.DNSServers, r.AutoProfileIDs, r.DirectDomains, r.DNSDoH, r.RouteMode, r.GeoIPURL, r.GeoSiteURL, r.Fragment, r.KillSwitch)
+				w.cancelReconnect()
+				if w.state == "reconnecting" {
+					_ = w.close()
+				}
+				err = w.connect(ctx, r)
 				if err == nil {
 					result = w.currentActiveProfile()
 				}
@@ -644,7 +743,7 @@ func main() {
 					err = w.closeTunnel(true)
 					if err == nil {
 						w.setState("connecting")
-						err = w.connect(ctx, r.ProfileID, r.DNS, r.DNSServers, r.AutoProfileIDs, r.DirectDomains, r.DNSDoH, r.RouteMode, r.GeoIPURL, r.GeoSiteURL, r.Fragment, r.KillSwitch)
+						err = w.connect(ctx, r)
 					}
 					if err == nil {
 						result = w.currentActiveProfile()
@@ -691,6 +790,7 @@ func main() {
 				}
 			case "disconnect":
 				w.logf("disconnect requested")
+				w.cancelReconnect()
 				w.setState("disconnecting")
 				err = w.close()
 				w.setState("disconnected")

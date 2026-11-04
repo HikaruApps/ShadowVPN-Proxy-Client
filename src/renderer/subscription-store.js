@@ -1,6 +1,9 @@
 (() => {
   const storageKey = "shadowvpn.subscriptions.v1";
   const legacyStorageKey = "shadowvpn.subscriptionUrl";
+  // The renderer swaps in a storage backed by the core's DPAPI vault.
+  let defaultStorage = null;
+  function useStorage(storage) { defaultStorage = storage; }
   const maxSubscriptions = 16;
 
   function validURL(value) {
@@ -73,7 +76,7 @@
     return id;
   }
 
-  function readState(storage = localStorage) {
+  function readState(storage = defaultStorage || localStorage) {
     try {
       const parsed = JSON.parse(storage.getItem(storageKey) || "null");
       if (parsed) return normalizeState(parsed);
@@ -88,7 +91,7 @@
     return { items: [], selectedId: "", activeId: "" };
   }
 
-  function writeState(value, storage = localStorage) {
+  function writeState(value, storage = defaultStorage || localStorage) {
     const state = normalizeState(value);
     try {
       storage.setItem(storageKey, JSON.stringify(state));
@@ -155,7 +158,7 @@
   }
 
   window.shadowVpnSubscriptions = Object.freeze({
-    storageKey, legacyStorageKey, maxSubscriptions, validURL, readState, writeState,
+    storageKey, legacyStorageKey, maxSubscriptions, validURL, readState, writeState, useStorage,
     addItem, updateItem, removeItem, updateMetadata, activeItems, cleanMetadata, displayHost,
   });
 })();

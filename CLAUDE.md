@@ -37,7 +37,7 @@ On Linux, also run `GOOS=windows go vet ./...` to type-check the Windows-only fi
 
 ## Architecture
 
-**IPC chain:** `renderer.js` → `window.vpnApi` (`tauri-bridge.js`) → `invoke('vpn_*')` Tauri commands (`src-tauri/src/main.rs`) → `Backend` (`src-tauri/src/backend.rs`) → JSON lines over the child's **stdin/stdout** → `backend/main.go` request loop (`switch r.Method`: `import`, `importMany`, `connect`, `switch`, `ping`, `diagnose`, `disconnect`, `publicIp`, `deviceInfo`, `shutdown`).
+**IPC chain:** `renderer.js` → `window.vpnApi` (`tauri-bridge.js`) → `invoke('vpn_*')` Tauri commands (`src-tauri/src/main.rs`) → `Backend` (`src-tauri/src/backend.rs`) → JSON lines over the child's **stdin/stdout** → `backend/main.go` request loop (`switch r.Method`: `import`, `importMany`, `connect`, `switch`, `ping`, `diagnose`, `disconnect`, `publicIp`, `deviceInfo`, `shutdown`). `vaultLoad`/`vaultSave` are answered in the stdin reader goroutine instead, so a long connect never delays saving the UI's subscription list.
 - Requests carry an `id`. Responses are `{id, ok, result|error}`. Messages without an `id` are events (`ready`, state, profile, traffic, log). Rust re-emits them to the WebView as `vpn:state`, `vpn:profile`, `vpn:traffic`, `vpn:log`, `vpn:error`, `vpn:update-progress` and `vpn:tray-action`.
 - In Go, stdout is reserved for IPC (`os.Stdout = os.Stderr` after the encoder is created). Never print to stdout from the core. Diagnostics go to stderr, and Rust collects them into an in-memory log of up to 1500 lines.
 - There is no TCP control port and no shell. The Tauri capability (`src-tauri/capabilities/default.json`) only grants event listen/unlisten. The CSP is strict (`script-src 'self'`, no inline scripts or styles).
@@ -54,7 +54,11 @@ On Linux, also run `GOOS=windows go vet ./...` to type-check the Windows-only fi
 - `Backend::shutdown` kills the child if it doesn't exit within 25 s.
 - In Go, `closeInstance` exits the process if `instance.Close()` hangs for 15 s, `shutdown` has a 20 s watchdog, and `cleanupStaleNetworkState` flushes routes and DNS on a leftover adapter at startup.
 
-**UI state** (subscriptions, groups, settings) lives in WebView `localStorage` through `subscription-store.js`, `group-store.js` and `settings-store.js`. Those stores include migration logic from earlier storage formats.
+**UI state:** groups and settings live in WebView `localStorage` through `group-store.js` and `settings-store.js`. The subscription list holds access keys, so `subscription-store.js` runs on an in-memory storage (`useStorage`) that `renderer.js` mirrors into the core's DPAPI vault (`backend/vault.go`, `vpn_vault_load`/`vpn_vault_save`). On first start it migrates the old `localStorage` keys. The stores include migration logic from earlier storage formats.
+
+**Connection modes:** `connectionMode` is `tun` (Wintun adapter, `tun-in`) or `proxy`: SOCKS `127.0.0.1:10808` and HTTP `127.0.0.1:10809` (`socks-in`, `http-in`), with the WinINet system proxy set after the connectivity probe passes. `backend/sysproxy_windows.go` saves the user's previous proxy to `system-proxy-restore.json` first, and `cleanupStaleNetworkState` restores it after a crash. Routing rules use `routingOptions.inboundTags()`, so they work in both modes. `app:<exe>` rules become Xray `process` rules. The Kill Switch is TUN-only.
+
+**Auto-reconnect** (`backend/reconnect.go`): while connected, a health monitor probes through the instance every 20 s. After wake from sleep (detected by a wall-clock gap) or two failures in a row, it sends an internal `reconnect` request to the worker loop. The worker reconnects with `lastConnect` and backs off up to 60 s, keeping the Kill Switch session between attempts. The extra state `reconnecting` keeps the power button enabled so the user can cancel.
 
 **Platform split in Go:** `*_windows.go` and `*_other.go` (HWID, platform/routes, WFP). The Kill Switch uses a dynamic WFP session, so Windows removes its filters when the core process dies. It is deliberately incompatible with split-routing modes.
 

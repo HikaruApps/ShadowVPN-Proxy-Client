@@ -7,6 +7,9 @@
   const lastSubscriptionSyncStorageKey = "shadowvpn.subscriptionLastSync";
   const pingMethodStorageKey = "shadowvpn.pingMethod";
   const pingOnOpenStorageKey = "shadowvpn.pingOnOpen";
+  const closeToTrayStorageKey = "shadowvpn.closeToTray";
+  const autoReconnectStorageKey = "shadowvpn.autoReconnect";
+  const connectionModeStorageKey = "shadowvpn.connectionMode";
   const routingModeStorageKey = "shadowvpn.routingMode";
   const routingDomainsStorageKey = "shadowvpn.routingDomains";
   const geoIPURLStorageKey = "shadowvpn.geoIpUrl";
@@ -155,6 +158,35 @@
     catch { return false; }
   }
 
+  // On by default: stored only as "false" when the user turns them off.
+  function readFlag(key, storage) {
+    try { return storage.getItem(key) !== "false"; }
+    catch { return true; }
+  }
+  function writeFlag(key, value, storage) {
+    const enabled = Boolean(value);
+    try { storage.setItem(key, String(enabled)); } catch { /* Keep the session value. */ }
+    return enabled;
+  }
+  const readCloseToTray = (storage = window.localStorage) => readFlag(closeToTrayStorageKey, storage);
+  const writeCloseToTray = (value, storage = window.localStorage) => writeFlag(closeToTrayStorageKey, value, storage);
+  const readAutoReconnect = (storage = window.localStorage) => readFlag(autoReconnectStorageKey, storage);
+  const writeAutoReconnect = (value, storage = window.localStorage) => writeFlag(autoReconnectStorageKey, value, storage);
+
+  const connectionModes = Object.freeze([
+    Object.freeze({ id: "tun", name: "TUN — весь трафик", detail: "Виртуальный адаптер: через VPN идут все программы" }),
+    Object.freeze({ id: "proxy", name: "Системный прокси", detail: "Через VPN идут браузеры и программы, учитывающие прокси Windows" }),
+  ]);
+  function readConnectionMode(storage = window.localStorage) {
+    try { return storage.getItem(connectionModeStorageKey) === "proxy" ? "proxy" : "tun"; }
+    catch { return "tun"; }
+  }
+  function writeConnectionMode(value, storage = window.localStorage) {
+    const mode = value === "proxy" ? "proxy" : "tun";
+    try { storage.setItem(connectionModeStorageKey, mode); } catch { /* Keep the session value. */ }
+    return mode;
+  }
+
   function writePingOnOpen(value, storage = window.localStorage) {
     const enabled = Boolean(value);
     try { storage.setItem(pingOnOpenStorageKey, String(enabled)); } catch { /* Keep the session value. */ }
@@ -163,8 +195,8 @@
 
   const routingModes = Object.freeze([
     Object.freeze({ id: "full", name: "Весь трафик через VPN", detail: "Стандартный режим ShadowVPN" }),
-    Object.freeze({ id: "bypass", name: "Выбранные домены напрямую", detail: "Остальное идёт через VPN" }),
-    Object.freeze({ id: "proxy_only", name: "Только выбранные домены через VPN", detail: "Остальное подключается напрямую" }),
+    Object.freeze({ id: "bypass", name: "Выбранные сайты и программы напрямую", detail: "Остальное идёт через VPN" }),
+    Object.freeze({ id: "proxy_only", name: "Только выбранные сайты и программы через VPN", detail: "Остальное подключается напрямую" }),
   ]);
 
   function normalizeRoutingMode(value) {
@@ -304,6 +336,13 @@
     writePingMethod,
     readPingOnOpen,
     writePingOnOpen,
+    readCloseToTray,
+    writeCloseToTray,
+    readAutoReconnect,
+    writeAutoReconnect,
+    connectionModes,
+    readConnectionMode,
+    writeConnectionMode,
     routingModes,
     normalizeRoutingMode,
     readRoutingMode,

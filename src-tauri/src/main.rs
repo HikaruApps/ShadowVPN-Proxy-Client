@@ -65,6 +65,8 @@ struct Closing {
 }
 #[derive(Default)]
 struct Updating(Arc<AtomicBool>);
+/// Closing the window hides it to the tray instead of quitting.
+struct CloseToTray(AtomicBool);
 struct UpdateGuard(Arc<AtomicBool>);
 
 impl Drop for UpdateGuard {
@@ -186,8 +188,17 @@ async fn vpn_connect(
     geo_ip_url: Option<String>,
     geo_site_url: Option<String>,
     replace_current: Option<bool>,
+    connection_mode: Option<String>,
+    auto_reconnect: Option<bool>,
     service: State<'_, Service>,
 ) -> Result<Value, String> {
+    let connection_mode = match connection_mode.as_deref() {
+        Some("proxy") => "proxy",
+        _ => "tun",
+    };
+    if connection_mode == "proxy" && kill_switch.unwrap_or(false) {
+        return Err("Kill Switch работает только в режиме TUN".into());
+    }
     if profile_id.len() != 24 || !profile_id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Выберите сервер".into());
     }
@@ -232,7 +243,7 @@ async fn vpn_connect(
     call(
         &service,
         method,
-        json!({"profileId":profile_id,"dns":dns,"dnsServers":dns_servers,"dnsDoh":dns_doh,"fragmentation":fragmentation.unwrap_or(false),"killSwitch":kill_switch.unwrap_or(false),"autoProfileIds":auto_profile_ids,"routeMode":route_mode,"directDomains":direct_domains,"geoIpUrl":geo_ip_url,"geoSiteUrl":geo_site_url}),
+        json!({"profileId":profile_id,"dns":dns,"dnsServers":dns_servers,"dnsDoh":dns_doh,"fragmentation":fragmentation.unwrap_or(false),"killSwitch":kill_switch.unwrap_or(false),"autoProfileIds":auto_profile_ids,"routeMode":route_mode,"directDomains":direct_domains,"geoIpUrl":geo_ip_url,"geoSiteUrl":geo_site_url,"connectionMode":connection_mode,"autoReconnect":auto_reconnect.unwrap_or(true)}),
     )
     .await
 }
@@ -251,6 +262,23 @@ async fn vpn_ping(
         _ => "tcp",
     };
     call(&service, "ping", json!({"pingMethod":ping_method})).await
+}
+/// The subscription list (its links are access keys) is kept by the core,
+/// sealed with DPAPI, instead of WebView localStorage.
+#[tauri::command]
+async fn vpn_vault_load(service: State<'_, Service>) -> Result<Value, String> {
+    query(&service, "vaultLoad", json!({})).await
+}
+#[tauri::command]
+async fn vpn_vault_save(data: String, service: State<'_, Service>) -> Result<Value, String> {
+    if data.len() > 512 * 1024 {
+        return Err("Слишком большой объём настроек".into());
+    }
+    query(&service, "vaultSave", json!({"data":data})).await
+}
+#[tauri::command]
+fn vpn_set_close_to_tray(enabled: bool, close_to_tray: State<'_, CloseToTray>) {
+    close_to_tray.0.store(enabled, Ordering::Release);
 }
 #[tauri::command]
 async fn vpn_diagnose(
@@ -369,7 +397,8 @@ fn vpn_set_autostart(enabled: bool) -> Result<bool, String> {
         let output = if enabled {
             let executable = std::env::current_exe()
                 .map_err(|_| "Не удалось определить путь ShadowVPN".to_string())?;
-            let command = format!("\"{}\"", executable.display());
+            // Started at logon, the app stays in the tray until opened.
+            let command = format!("\"{}\" --hidden", executable.display());
             std::process::Command::new("schtasks.exe")
                 .args([
                     "/Create",
@@ -476,6 +505,7 @@ fn main() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Closing::default())
+        .manage(CloseToTray(AtomicBool::new(true)))
         .manage(Updating::default())
         .setup(|app| {
             let open_item =
@@ -531,6 +561,11 @@ fn main() {
                 tray_builder = tray_builder.icon(icon.clone());
             }
             tray_builder.build(app)?;
+            if std::env::args().any(|argument| argument == "--hidden") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
 
             let name = if cfg!(windows) {
                 "shadowvpn-core.exe"
@@ -559,7 +594,8 @@ fn main() {
                     &executable,
                     move |state| {
                         let _ = connect_menu_item.set_enabled(state == "disconnected");
-                        let _ = disconnect_menu_item.set_enabled(state == "connected");
+                        let _ = disconnect_menu_item
+                            .set_enabled(state == "connected" || state == "reconnecting");
                         let _ = state_handle.emit("vpn:state", state);
                     },
                     move |profile| {
@@ -594,6 +630,9 @@ fn main() {
             vpn_ping,
             vpn_public_ip,
             vpn_diagnose,
+            vpn_vault_load,
+            vpn_vault_save,
+            vpn_set_close_to_tray,
             vpn_device_info,
             vpn_check_update,
             vpn_install_update,
@@ -605,14 +644,16 @@ fn main() {
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if !window
-                    .app_handle()
-                    .state::<Closing>()
-                    .finished
-                    .load(Ordering::Acquire)
-                {
+                let app = window.app_handle();
+                if !app.state::<Closing>().finished.load(Ordering::Acquire) {
                     api.prevent_close();
-                    request_exit(window.app_handle().clone());
+                    if app.state::<CloseToTray>().0.load(Ordering::Acquire)
+                        && !app.state::<Closing>().active.load(Ordering::Acquire)
+                    {
+                        let _ = window.hide();
+                    } else {
+                        request_exit(app.clone());
+                    }
                 }
             }
         })
