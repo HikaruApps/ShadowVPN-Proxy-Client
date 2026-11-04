@@ -212,7 +212,14 @@ impl Backend {
                 };
                 if msg["event"] == "state" {
                     if let Some(s) = msg["state"].as_str().filter(|s| {
-                        ["disconnected", "connecting", "connected", "disconnecting"].contains(s)
+                        [
+                            "disconnected",
+                            "connecting",
+                            "connected",
+                            "disconnecting",
+                            "reconnecting",
+                        ]
+                        .contains(s)
                     }) {
                         *state.lock().unwrap() = s.to_string();
                         state_callback(s.to_string());

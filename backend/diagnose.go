@@ -157,7 +157,7 @@ func (w *worker) diagnose(ctx context.Context, profileID string, autoProfileIDs 
 		steps = append(steps, diagnoseStep{ID: "vpn", State: "skip", Detail: "VPN не подключён: подключитесь и запустите проверку снова"})
 		return steps, nil
 	}
-	ip, ipErr := publicIPv4(ctx)
+	ip, ipErr := publicIPv4Via(ctx, instanceDial(w.instance))
 	if ipErr != nil {
 		steps = append(steps, diagnoseStep{ID: "vpn", State: "fail", Detail: "Не работает: " + maskIPs(explainProbeError(ipErr))})
 	} else {

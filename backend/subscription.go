@@ -706,11 +706,16 @@ type routingOptions struct {
 	Mode          string
 	DirectDomains []string
 	IPRules       []string
-	GeoIPURL      string
-	GeoSiteURL    string
-	AssetDir      string
-	NeedsGeoIP    bool
-	NeedsGeoSite  bool
+	// Processes are executable names (without .exe) matched by Xray's
+	// process rule; written as app:steam.exe in the rule list.
+	Processes []string
+	// Proxy is the system-proxy mode: local SOCKS/HTTP inbounds instead of TUN.
+	Proxy        bool
+	GeoIPURL     string
+	GeoSiteURL   string
+	AssetDir     string
+	NeedsGeoIP   bool
+	NeedsGeoSite bool
 }
 
 func validGeoDataTag(value string) bool {
@@ -727,9 +732,9 @@ func validGeoDataTag(value string) bool {
 	return true
 }
 
-// splitRoutingRules accepts one rule per line; lines that are not regexp: may
-// also hold several rules separated by commas or spaces. A regexp keeps its
-// whole line because commas are part of the syntax ({2,3}).
+// splitRoutingRules accepts one rule per line; other lines may also hold
+// several rules separated by commas or spaces. A regexp keeps its whole line
+// because commas are part of the syntax ({2,3}).
 func splitRoutingRules(lines []string) []string {
 	var rules []string
 	for _, raw := range lines {
@@ -738,8 +743,21 @@ func splitRoutingRules(lines []string) []string {
 			if line == "" {
 				continue
 			}
-			if strings.HasPrefix(strings.ToLower(line), "regexp:") {
+			lower := strings.ToLower(line)
+			if strings.HasPrefix(lower, "regexp:") {
 				rules = append(rules, line)
+				continue
+			}
+			// Program paths may contain spaces, so app: lines split on commas only.
+			if strings.HasPrefix(lower, "app:") {
+				for _, part := range strings.Split(line, ",") {
+					if part = strings.TrimSpace(part); part != "" {
+						if !strings.HasPrefix(strings.ToLower(part), "app:") {
+							part = "app:" + part
+						}
+						rules = append(rules, part)
+					}
+				}
 				continue
 			}
 			rules = append(rules, strings.Fields(strings.ReplaceAll(line, ",", " "))...)
@@ -822,14 +840,31 @@ func newRoutingOptions(mode string, directDomains []string, geoIPURL, geoSiteURL
 	seen := make(map[string]struct{}, len(directDomains))
 	needsGeoIP := false
 	needsGeoSite := false
+	var processes []string
 	for _, item := range splitRoutingRules(directDomains) {
 		if len(item) > 255 || strings.ContainsAny(item, "\"'") {
 			return routingOptions{}, errors.New("Правило маршрутизации содержит недопустимый домен")
 		}
-		if strings.Contains(item, "\\") && !strings.HasPrefix(strings.ToLower(item), "regexp:") {
-			return routingOptions{}, errors.New("Обратная косая черта допустима только в правилах regexp:")
+		if lower := strings.ToLower(item); strings.Contains(item, "\\") && !strings.HasPrefix(lower, "regexp:") && !strings.HasPrefix(lower, "app:") {
+			return routingOptions{}, errors.New("Обратная косая черта допустима только в правилах regexp: и app:")
 		}
 		lowerItem := strings.ToLower(item)
+		if strings.HasPrefix(lowerItem, "app:") {
+			names, appErr := processRuleNames(item[len("app:"):])
+			if appErr != nil {
+				return routingOptions{}, appErr
+			}
+			for _, name := range names {
+				if _, exists := seen["app:"+name]; !exists {
+					seen["app:"+name] = struct{}{}
+					processes = append(processes, name)
+				}
+			}
+			if len(normalized)+len(ipRules)+len(processes) > 512 {
+				return routingOptions{}, errors.New("Можно добавить не больше 512 правил маршрутизации")
+			}
+			continue
+		}
 		if strings.HasPrefix(lowerItem, "geoip:") {
 			value := strings.TrimSpace(item[len("geoip:"):])
 			if !validGeoDataTag(value) {
@@ -892,7 +927,7 @@ func newRoutingOptions(mode string, directDomains []string, geoIPURL, geoSiteURL
 			return routingOptions{}, errors.New("Можно добавить не больше 512 правил маршрутизации")
 		}
 	}
-	if len(normalized)+len(ipRules) == 0 {
+	if len(normalized)+len(ipRules)+len(processes) == 0 {
 		return routingOptions{}, errors.New("Для выбранного режима укажите хотя бы одно правило")
 	}
 	geoIPURL, err := normalizeGeoDataURL(geoIPURL, "GeoIP")
@@ -913,6 +948,7 @@ func newRoutingOptions(mode string, directDomains []string, geoIPURL, geoSiteURL
 		Mode:          mode,
 		DirectDomains: normalized,
 		IPRules:       ipRules,
+		Processes:     processes,
 		GeoIPURL:      geoIPURL,
 		GeoSiteURL:    geoSiteURL,
 		NeedsGeoIP:    needsGeoIP,
@@ -920,17 +956,55 @@ func newRoutingOptions(mode string, directDomains []string, geoIPURL, geoSiteURL
 	}, nil
 }
 
+// processRuleNames turns "steam.exe" into the names Xray compares: the file
+// name without .exe, as typed and in lower case (Windows names keep their case).
+func processRuleNames(raw string) ([]string, error) {
+	name := strings.TrimSpace(raw)
+	if index := strings.LastIndexAny(name, "\\/"); index >= 0 {
+		name = name[index+1:]
+	}
+	if len(name) >= 4 && strings.EqualFold(name[len(name)-4:], ".exe") {
+		name = name[:len(name)-4]
+	}
+	if name == "" || len(name) > 128 || strings.ContainsAny(name, "<>:\"|?*") {
+		return nil, errors.New("Правило app: должно содержать имя программы, например app:steam.exe")
+	}
+	names := []string{name}
+	if lower := strings.ToLower(name); lower != name {
+		names = append(names, lower)
+	}
+	return names, nil
+}
+
+// inboundTags are the local entry points whose traffic the routing rules see.
+func (routing routingOptions) inboundTags() []string {
+	if routing.Proxy {
+		return []string{"socks-in", "http-in"}
+	}
+	return []string{"tun-in"}
+}
+
+func (routing routingOptions) hasSelectionRules() bool {
+	return len(routing.DirectDomains) > 0 || len(routing.IPRules) > 0 || len(routing.Processes) > 0
+}
+
 func routingSelectionRules(routing routingOptions, targetKey, target string) []any {
-	rules := make([]any, 0, 2)
+	rules := make([]any, 0, 3)
+	if len(routing.Processes) > 0 {
+		rules = append(rules, map[string]any{
+			"type": "field", "inboundTag": routing.inboundTags(),
+			"process": routing.Processes, targetKey: target,
+		})
+	}
 	if len(routing.DirectDomains) > 0 {
 		rules = append(rules, map[string]any{
-			"type": "field", "inboundTag": []string{"tun-in"},
+			"type": "field", "inboundTag": routing.inboundTags(),
 			"domain": routing.DirectDomains, targetKey: target,
 		})
 	}
 	if len(routing.IPRules) > 0 {
 		rules = append(rules, map[string]any{
-			"type": "field", "inboundTag": []string{"tun-in"},
+			"type": "field", "inboundTag": routing.inboundTags(),
 			"ip": routing.IPRules, targetKey: target,
 		})
 	}
@@ -1000,15 +1074,15 @@ func makeAutoConfigWithRoutingAndDoH(profiles []Profile, dnsID string, customSer
 		"probeInterval":     autoProbeInterval,
 		"enableConcurrency": true,
 	}
-	rules := dnsRoutingRules(dns)
+	rules := dnsRoutingRules(dns, routing)
 	if routing.Mode == "bypass" {
 		rules = append(rules, routingSelectionRules(routing, "outboundTag", "direct")...)
 	} else if routing.Mode == "proxy_only" {
 		rules = append(rules, routingSelectionRules(routing, "balancerTag", "shadow-auto")...)
-		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "outboundTag": "direct"})
+		rules = append(rules, map[string]any{"type": "field", "inboundTag": routing.inboundTags(), "outboundTag": "direct"})
 	}
 	if routing.Mode != "proxy_only" {
-		rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "balancerTag": "shadow-auto"})
+		rules = append(rules, map[string]any{"type": "field", "inboundTag": routing.inboundTags(), "balancerTag": "shadow-auto"})
 	}
 	config["routing"] = map[string]any{
 		"domainStrategy": "IPIfNonMatch",
@@ -1070,9 +1144,18 @@ func runtimeConfigWithRouting(outbounds []any, dns dnsPreset, outboundInterface 
 	if dns.DoHURL != "" {
 		runtimeOutbounds = append(runtimeOutbounds, map[string]any{"tag": "dns-out", "protocol": "dns", "settings": map[string]any{}})
 	}
+	sniffing := map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}}
+	inbounds := []any{map[string]any{"tag": "tun-in", "protocol": "tun", "sniffing": sniffing, "settings": map[string]any{"name": "ShadowVPN", "desc": "ShadowVPN", "mtu": 1500, "gateway": []string{"172.31.255.1/30", "fd31:ffff::1/126"}, "dns": dns.Servers, "autoSystemRoutingTable": []string{"0.0.0.0/0", "::/0"}, "autoOutboundsInterface": outboundInterface}}}
+	if routing.Proxy {
+		// Loopback only: the system proxy points browsers and apps here.
+		inbounds = []any{
+			map[string]any{"tag": "socks-in", "protocol": "socks", "listen": "127.0.0.1", "port": localSocksPort, "sniffing": sniffing, "settings": map[string]any{"udp": true}},
+			map[string]any{"tag": "http-in", "protocol": "http", "listen": "127.0.0.1", "port": localHTTPPort, "sniffing": sniffing, "settings": map[string]any{}},
+		}
+	}
 	config := map[string]any{
 		"log":       map[string]any{"loglevel": "debug"},
-		"inbounds":  []any{map[string]any{"tag": "tun-in", "protocol": "tun", "sniffing": map[string]any{"enabled": true, "destOverride": []string{"http", "tls", "quic"}}, "settings": map[string]any{"name": "ShadowVPN", "desc": "ShadowVPN", "mtu": 1500, "gateway": []string{"172.31.255.1/30", "fd31:ffff::1/126"}, "dns": dns.Servers, "autoSystemRoutingTable": []string{"0.0.0.0/0", "::/0"}, "autoOutboundsInterface": outboundInterface}}},
+		"inbounds":  inbounds,
 		"outbounds": runtimeOutbounds,
 		"policy": map[string]any{"system": map[string]any{
 			"statsInboundUplink":   true,
@@ -1083,11 +1166,11 @@ func runtimeConfigWithRouting(outbounds []any, dns dnsPreset, outboundInterface 
 	if dns.DoHURL != "" {
 		config["dns"] = map[string]any{"servers": []string{dns.DoHURL}, "queryStrategy": "UseIP"}
 	}
-	rules := dnsRoutingRules(dns)
-	if routing.Mode != "full" && (len(routing.DirectDomains) > 0 || len(routing.IPRules) > 0) {
+	rules := dnsRoutingRules(dns, routing)
+	if routing.Mode != "full" && routing.hasSelectionRules() {
 		if routing.Mode == "proxy_only" {
 			rules = append(rules, routingSelectionRules(routing, "outboundTag", "proxy")...)
-			rules = append(rules, map[string]any{"type": "field", "inboundTag": []string{"tun-in"}, "outboundTag": "direct"})
+			rules = append(rules, map[string]any{"type": "field", "inboundTag": routing.inboundTags(), "outboundTag": "direct"})
 		} else {
 			rules = append(rules, routingSelectionRules(routing, "outboundTag", "direct")...)
 		}
@@ -1099,8 +1182,16 @@ func runtimeConfigWithRouting(outbounds []any, dns dnsPreset, outboundInterface 
 	return config
 }
 
-func dnsRoutingRules(dns dnsPreset) []any {
-	if dns.DoHURL == "" {
+// Local ports of the system-proxy mode.
+const (
+	localSocksPort = 10808
+	localHTTPPort  = 10809
+)
+
+func dnsRoutingRules(dns dnsPreset, routing routingOptions) []any {
+	// Port 53 is only intercepted inside the TUN; proxy clients resolve through
+	// the proxy themselves.
+	if dns.DoHURL == "" || routing.Proxy {
 		return []any{}
 	}
 	return []any{map[string]any{

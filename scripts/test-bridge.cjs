@@ -33,6 +33,10 @@ vm.runInNewContext(fs.readFileSync('src/renderer/tauri-bridge.js', 'utf8'), { wi
   await window.vpnApi.diagnose('abcdef', ['x']); assert.equal(calls.at(-1)[0], 'vpn_diagnose');
   assert.equal(calls.at(-1)[1].profileId, 'abcdef'); assert.deepEqual([...calls.at(-1)[1].autoProfileIds], ['x']);
   await window.vpnApi.connect('abcdef');
+  assert.equal(calls.at(-1)[1].connectionMode, 'tun'); assert.equal(calls.at(-1)[1].autoReconnect, true);
+  await window.vpnApi.saveVault('{"a":"b"}'); assert.equal(calls.at(-1)[0], 'vpn_vault_save'); assert.equal(calls.at(-1)[1].data, '{"a":"b"}');
+  await window.vpnApi.loadVault(); assert.equal(calls.at(-1)[0], 'vpn_vault_load');
+  await window.vpnApi.setCloseToTray(false); assert.equal(calls.at(-1)[0], 'vpn_set_close_to_tray'); assert.equal(calls.at(-1)[1].enabled, false);
   await window.vpnApi.connect('abcdef', 'quad9'); assert.equal(calls.at(-1)[1].dns, 'quad9');
   await window.vpnApi.connect('abcdef', 'custom', ['192.168.1.1']);
   assert.deepEqual([...calls.at(-1)[1].dnsServers], ['192.168.1.1']);

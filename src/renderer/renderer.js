@@ -39,6 +39,10 @@ const pingMethodSelect = document.getElementById("pingMethodSelect");
 const pingMethodDescription = document.getElementById("pingMethodDescription");
 const fragmentationToggle = document.getElementById("fragmentationToggle");
 const killSwitchToggle = document.getElementById("killSwitchToggle");
+const closeToTrayToggle = document.getElementById("closeToTrayToggle");
+const autoReconnectToggle = document.getElementById("autoReconnectToggle");
+const connectionModeSelect = document.getElementById("connectionModeSelect");
+const connectionModeDescription = document.getElementById("connectionModeDescription");
 const autoStartToggle = document.getElementById("autoStartToggle");
 const autoStartDescription = document.getElementById("autoStartDescription");
 const pingOnOpenToggle = document.getElementById("pingOnOpenToggle");
@@ -116,9 +120,59 @@ let logLineCount = 0;
 let sortMenuOpen = false;
 const { serverFlagAndName, sortServerProfiles, filterServerProfiles } = window.shadowVpnDisplay;
 const { normalizeTraffic, formatBytes, formatSpeed } = window.shadowVpnTraffic;
-const { dnsProviders, readDNS, writeDNS, readCustomDNS, writeCustomDNS, readFragmentation, writeFragmentation, readKillSwitch, writeKillSwitch, autoUpdateIntervals, readAutoUpdate, writeAutoUpdate, readLastSubscriptionSync, writeLastSubscriptionSync, pingMethods, readPingMethod, writePingMethod, readPingOnOpen, writePingOnOpen, routingModes, readRoutingMode, writeRoutingMode, readRoutingDomains, writeRoutingDomains, readGeoIPURL, writeGeoIPURL, readGeoSiteURL, writeGeoSiteURL, validateGeoDataSources, parseCustomDNS } = window.shadowVpnSettings;
+const { dnsProviders, readDNS, writeDNS, readCustomDNS, writeCustomDNS, readFragmentation, writeFragmentation, readKillSwitch, writeKillSwitch, autoUpdateIntervals, readAutoUpdate, writeAutoUpdate, readLastSubscriptionSync, writeLastSubscriptionSync, pingMethods, readPingMethod, writePingMethod, readPingOnOpen, writePingOnOpen, readCloseToTray, writeCloseToTray, readAutoReconnect, writeAutoReconnect, connectionModes, readConnectionMode, writeConnectionMode, routingModes, readRoutingMode, writeRoutingMode, readRoutingDomains, writeRoutingDomains, readGeoIPURL, writeGeoIPURL, readGeoSiteURL, writeGeoSiteURL, validateGeoDataSources, parseCustomDNS } = window.shadowVpnSettings;
 const groupStore = window.shadowVpnGroups;
 const subscriptionStore = window.shadowVpnSubscriptions;
+
+// Subscription links are access keys, so they live in the core's DPAPI vault
+// instead of WebView localStorage. The store keeps its synchronous API through
+// this in-memory storage; every change is written back to the vault.
+const vaultKeys = [subscriptionStore.storageKey, subscriptionStore.legacyStorageKey];
+const vaultValues = new Map();
+let vaultReady = false;
+let vaultSaveTimer = null;
+const vaultStorage = {
+  getItem: key => (vaultValues.has(key) ? vaultValues.get(key) : null),
+  setItem: (key, value) => { vaultValues.set(key, String(value)); scheduleVaultSave(); },
+  removeItem: key => { vaultValues.delete(key); scheduleVaultSave(); },
+};
+function vaultSnapshot() {
+  return JSON.stringify(Object.fromEntries(vaultValues));
+}
+function scheduleVaultSave() {
+  // Until the vault is read, a write would replace the saved list with an empty one.
+  if (!vaultReady) return;
+  window.clearTimeout(vaultSaveTimer);
+  vaultSaveTimer = window.setTimeout(async () => {
+    const reply = await window.vpnApi.saveVault(vaultSnapshot());
+    if (!reply.ok) statusText.textContent = reply.error || "Не удалось сохранить подписки";
+  }, 150);
+}
+async function loadSubscriptionVault() {
+  const reply = await window.vpnApi.loadVault();
+  if (!reply.ok) {
+    // The core is unavailable: keep working from localStorage this session.
+    subscriptionStore.useStorage(window.localStorage);
+    return;
+  }
+  let saved = null;
+  try { saved = reply.result?.data ? JSON.parse(reply.result.data) : null; } catch { saved = null; }
+  if (saved && typeof saved === "object") {
+    for (const key of vaultKeys) if (typeof saved[key] === "string") vaultValues.set(key, saved[key]);
+  } else {
+    // First start after the update: move the links out of localStorage.
+    for (const key of vaultKeys) {
+      try { const value = window.localStorage.getItem(key); if (value !== null) vaultValues.set(key, value); } catch { /* Nothing to move. */ }
+    }
+    if (vaultValues.size) {
+      const moved = await window.vpnApi.saveVault(vaultSnapshot());
+      if (moved.ok) for (const key of vaultKeys) try { window.localStorage.removeItem(key); } catch { /* Already gone. */ }
+    }
+  }
+  vaultReady = true;
+}
+subscriptionStore.useStorage(vaultStorage);
+
 let groupState = groupStore.readState();
 let subscriptionState = subscriptionStore.readState();
 let editingSubscriptionId = subscriptionState.selectedId;
@@ -128,6 +182,9 @@ let selectedDNS = readDNS();
 let customDNSValue = readCustomDNS();
 let fragmentationEnabled = readFragmentation();
 let killSwitchEnabled = readKillSwitch();
+let closeToTrayEnabled = readCloseToTray();
+let autoReconnectEnabled = readAutoReconnect();
+let selectedConnectionMode = readConnectionMode();
 let selectedAutoUpdate = readAutoUpdate();
 let selectedPingMethod = readPingMethod();
 let pingOnOpenEnabled = readPingOnOpen();
@@ -162,6 +219,7 @@ const STATUS_LABEL = {
   connecting: "Подключение…",
   connected: "Подключено",
   disconnecting: "Отключение…",
+  reconnecting: "Связь потеряна · переподключаемся…",
 };
 
 // One-shot render hints: cards slide in after a new list, sort or category;
@@ -508,6 +566,8 @@ async function loadProtectedIp() {
   }
 }
 
+let reconnectedSession = false;
+
 function applyState(state) {
   const previousState = currentState;
   currentState = state;
@@ -516,13 +576,15 @@ function applyState(state) {
 
   powerBtn.classList.remove("connected", "connecting", "disconnecting");
   if (state === "connected" || state === "connecting" || state === "disconnecting") powerBtn.classList.add(state);
-  powerBtn.setAttribute("aria-label", state === "connected" ? "Отключить VPN" : "Подключить VPN");
+  if (state === "reconnecting") powerBtn.classList.add("connecting");
+  powerBtn.setAttribute("aria-label", state === "connected" || state === "reconnecting" ? "Отключить VPN" : "Подключить VPN");
+  if (state === "reconnecting") reconnectedSession = true;
   if (state !== "connected") clearConnectedLocation();
 
-  if (state === "connecting") {
+  if (state === "connecting" || state === "reconnecting") {
     stopConnectionTimer();
     resetTrafficDisplay();
-    startIpEncryption();
+    startIpEncryption(state === "reconnecting" ? "Переподключение" : undefined);
   } else if (state === "connected") {
     stopIpEncryption();
     setIpText("Защищённый IP", "***.***.***.***", "protected");
@@ -530,9 +592,15 @@ function applyState(state) {
       startConnectionTimer();
       resetTrafficDisplay(true);
     }
+    // The core reconnected on its own, so no connect reply will fetch the IP.
+    if (reconnectedSession && !requestBusy) {
+      reconnectedSession = false;
+      void loadProtectedIp();
+    }
   } else if (state === "disconnecting") {
     startIpEncryption("Восстановление IP");
   } else if (state === "disconnected") {
+    reconnectedSession = false;
     stopIpEncryption();
     stopConnectionTimer();
     resetTrafficDisplay();
@@ -555,6 +623,7 @@ function applyState(state) {
     connecting: "Xray устанавливает соединение",
     connected: "Туннель активен",
     disconnecting: "Туннель закрывается",
+    reconnecting: "Связь потеряна, ядро переподключается",
   }[state] || "Диагностика активна";
   updatePingButton();
 }
@@ -1132,11 +1201,16 @@ function applyPushedState(state) {
 
 async function changeConnection(action = "toggle") {
   if (requestBusy || currentState === "connecting" || currentState === "disconnecting") return;
-  if (action === "connect" && currentState === "connected") return;
+  if (action === "connect" && (currentState === "connected" || currentState === "reconnecting")) return;
   if (action === "disconnect" && currentState === "disconnected") return;
   if (action === "switch" && currentState !== "connected") return;
   if (!serverProfiles.length) { statusText.textContent = "Сначала добавьте подписку"; return; }
-  const disconnecting = action === "disconnect" || (action === "toggle" && currentState === "connected");
+  const disconnecting = action === "disconnect" || (action === "toggle" && (currentState === "connected" || currentState === "reconnecting"));
+  if (!disconnecting && selectedConnectionMode === "proxy" && killSwitchEnabled) {
+    statusText.textContent = "Kill Switch работает только в режиме TUN";
+    openSettings();
+    return;
+  }
   const switching = action === "switch";
   const selectedIsAuto = !disconnecting && [AUTO_PROFILE_ID, AUTO_NO_RU_PROFILE_ID].includes(selectedGroupId);
   const selectedAutoGroup = selectedIsAuto ? groupStore.activeGroup(groupState) : null;
@@ -1166,7 +1240,8 @@ async function changeConnection(action = "toggle") {
     }
     customDNSServers = validation.servers;
   }
-  const directDomains = routingDomainsValue.split(/\s+/).map(item => item.trim()).filter(Boolean);
+  // One rule per line: program paths in app: rules may contain spaces.
+  const directDomains = routingDomainsValue.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
   const geoData = disconnecting
     ? { geoIPURL: "", geoSiteURL: "", error: "", field: "" }
     : updateGeoDataValidation();
@@ -1188,8 +1263,8 @@ async function changeConnection(action = "toggle") {
     const reply = disconnecting
       ? await window.vpnApi.disconnect()
       : switching
-        ? await window.vpnApi.switchServer(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL, subscriptionDoh)
-        : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL, subscriptionDoh);
+        ? await window.vpnApi.switchServer(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL, subscriptionDoh, selectedConnectionMode, autoReconnectEnabled)
+        : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL, subscriptionDoh, selectedConnectionMode, autoReconnectEnabled);
     if (!reply.ok) {
       statusText.textContent = reply.error;
       if (!disconnecting) flashPowerError();
@@ -1774,7 +1849,14 @@ async function removeManagedSubscription() {
 }
 
 document.getElementById("subscriptionForm").addEventListener("submit", event => { event.preventDefault(); void importSubscription("manual"); });
-if (subscriptionState.items.length) void importSavedSubscriptions();
+async function startWithSavedSubscriptions() {
+  await loadSubscriptionVault();
+  subscriptionState = subscriptionStore.readState();
+  editingSubscriptionId = subscriptionState.selectedId;
+  updateDNSControl();
+  if (subscriptionState.items.length) void importSavedSubscriptions();
+}
+void startWithSavedSubscriptions();
 // A crashed or hung core is replaced by the desktop shell; the new process has
 // no servers yet, so hand it the saved copy without touching the network.
 async function reloadAfterCoreRestart(attempt = 0) {
@@ -1913,6 +1995,24 @@ fragmentationToggle.addEventListener("change", () => {
 });
 killSwitchToggle.addEventListener("change", () => {
   killSwitchEnabled = writeKillSwitch(killSwitchToggle.checked);
+});
+closeToTrayToggle.addEventListener("change", () => {
+  closeToTrayEnabled = writeCloseToTray(closeToTrayToggle.checked);
+  void window.vpnApi.setCloseToTray(closeToTrayEnabled);
+});
+autoReconnectToggle.addEventListener("change", () => {
+  autoReconnectEnabled = writeAutoReconnect(autoReconnectToggle.checked);
+});
+function updateConnectionModeControl() {
+  connectionModeSelect.value = selectedConnectionMode;
+  const mode = connectionModes.find(item => item.id === selectedConnectionMode) || connectionModes[0];
+  connectionModeDescription.textContent = mode.detail;
+  const note = document.querySelector(".demo-note");
+  if (note) note.textContent = selectedConnectionMode === "proxy" ? "Системный прокси · Windows" : "TUN · Windows";
+}
+connectionModeSelect.addEventListener("change", () => {
+  selectedConnectionMode = writeConnectionMode(connectionModeSelect.value);
+  updateConnectionModeControl();
 });
 routingModeSelect.addEventListener("change", () => {
   selectedRoutingMode = writeRoutingMode(routingModeSelect.value);
@@ -2083,6 +2183,16 @@ geoSiteURLValue = readGeoSiteURL();
 fragmentationToggle.checked = fragmentationEnabled;
 killSwitchToggle.checked = killSwitchEnabled;
 pingOnOpenToggle.checked = pingOnOpenEnabled;
+closeToTrayToggle.checked = closeToTrayEnabled;
+autoReconnectToggle.checked = autoReconnectEnabled;
+for (const mode of connectionModes) {
+  const option = document.createElement("option");
+  option.value = mode.id;
+  option.textContent = mode.name;
+  connectionModeSelect.append(option);
+}
+updateConnectionModeControl();
+void window.vpnApi.setCloseToTray(closeToTrayEnabled);
 dashboard.dataset.vpnState = currentState;
 updateDNSControl();
 updateRoutingControl();

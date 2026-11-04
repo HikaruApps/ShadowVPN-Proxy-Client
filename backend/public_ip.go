@@ -33,8 +33,16 @@ func maskedPublicIPv4(value string) string {
 }
 
 func publicIPv4(parent context.Context) (string, error) {
+	return publicIPv4Via(parent, nil)
+}
+
+// publicIPv4Via asks the lookup services through dial, or directly when nil.
+func publicIPv4Via(parent context.Context, dial func(context.Context, string, string) (net.Conn, error)) (string, error) {
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 4 * time.Second, KeepAlive: 15 * time.Second}).DialContext
+	}
 	transport := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 4 * time.Second, KeepAlive: 15 * time.Second}).DialContext,
+		DialContext:           dial,
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   4 * time.Second,
 		ResponseHeaderTimeout: 4 * time.Second,

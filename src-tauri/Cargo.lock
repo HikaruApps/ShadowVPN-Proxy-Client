@@ -3341,7 +3341,7 @@ dependencies = [
 
 [[package]]
 name = "shadowvpn"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "serde_json",
  "tauri",

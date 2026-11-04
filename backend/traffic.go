@@ -8,11 +8,19 @@ import (
 	xstats "github.com/xtls/xray-core/features/stats"
 )
 
-const (
-	trafficSampleInterval  = time.Second
-	tunUploadCounterName   = "inbound>>>tun-in>>>traffic>>>uplink"
-	tunDownloadCounterName = "inbound>>>tun-in>>>traffic>>>downlink"
-)
+const trafficSampleInterval = time.Second
+
+// trafficCounters sums Xray's per-inbound counters: the TUN, or the SOCKS and
+// HTTP inbounds of the system-proxy mode.
+type trafficCounters []xstats.Counter
+
+func (counters trafficCounters) Value() int64 {
+	var total int64
+	for _, counter := range counters {
+		total += counter.Value()
+	}
+	return total
+}
 
 type trafficSnapshot struct {
 	UploadBytes   int64 `json:"uploadBytes"`
@@ -53,7 +61,7 @@ func (w *worker) stopTrafficMonitor() {
 	w.trafficWG.Wait()
 }
 
-func (w *worker) startTrafficMonitor(parent context.Context, instance *core.Instance) {
+func (w *worker) startTrafficMonitor(parent context.Context, instance *core.Instance, inboundTags []string) {
 	w.stopTrafficMonitor()
 	feature := instance.GetFeature(xstats.ManagerType())
 	manager, ok := feature.(xstats.Manager)
@@ -61,11 +69,16 @@ func (w *worker) startTrafficMonitor(parent context.Context, instance *core.Inst
 		w.logf("traffic monitor unavailable: Xray stats manager missing")
 		return
 	}
-	uploadCounter := manager.GetCounter(tunUploadCounterName)
-	downloadCounter := manager.GetCounter(tunDownloadCounterName)
-	if uploadCounter == nil || downloadCounter == nil {
-		w.logf("traffic monitor unavailable: TUN counters missing")
-		return
+	var uploadCounter, downloadCounter trafficCounters
+	for _, tag := range inboundTags {
+		up := manager.GetCounter("inbound>>>" + tag + ">>>traffic>>>uplink")
+		down := manager.GetCounter("inbound>>>" + tag + ">>>traffic>>>downlink")
+		if up == nil || down == nil {
+			w.logf("traffic monitor unavailable: counters missing for inbound=%s", tag)
+			return
+		}
+		uploadCounter = append(uploadCounter, up)
+		downloadCounter = append(downloadCounter, down)
 	}
 
 	ctx, cancel := context.WithCancel(parent)

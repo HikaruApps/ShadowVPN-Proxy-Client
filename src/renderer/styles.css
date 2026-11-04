@@ -213,7 +213,7 @@ body {
 .connection-map::before, .connection-map::after { content: ""; position: absolute; width: min(50vw, 520px); aspect-ratio: 1; border: 1px solid rgba(255,255,255,.035); border-radius: 50%; }
 .connection-map::after { width: min(36vw, 370px); }
 .connection-map img { width: 155%; height: 155%; max-width: none; object-fit: contain; opacity: .48; filter: grayscale(1) contrast(1.12); }
-.app[data-vpn-state="connecting"] .connection-map, .app[data-vpn-state="connected"] .connection-map { opacity: .82; transform: scale(1); }
+.app[data-vpn-state="connecting"] .connection-map, .app[data-vpn-state="connected"] .connection-map, .app[data-vpn-state="reconnecting"] .connection-map { opacity: .82; transform: scale(1); }
 .connect-stage > :not(.connection-map) { position: relative; z-index: 1; }
 
 .power-orb {
@@ -1396,7 +1396,8 @@ button:disabled { cursor: wait; opacity: .65; }
 .signal-bars i:nth-child(1) { height: 6px; }
 .signal-bars i:nth-child(2) { height: 10px; }
 .signal-bars i:nth-child(3) { height: 14px; }
-.app[data-vpn-state="connecting"] .signal-bars i { animation: bars-wave 1.2s ease-in-out infinite; }
+.app[data-vpn-state="connecting"] .signal-bars i,
+.app[data-vpn-state="reconnecting"] .signal-bars i { animation: bars-wave 1.2s ease-in-out infinite; }
 .app[data-vpn-state="disconnecting"] .signal-bars i { animation: bars-wave 1.2s ease-in-out infinite reverse; }
 .signal-bars i:nth-child(2) { animation-delay: 150ms !important; }
 .signal-bars i:nth-child(3) { animation-delay: 300ms !important; }
