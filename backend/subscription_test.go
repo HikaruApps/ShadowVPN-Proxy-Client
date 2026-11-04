@@ -347,3 +347,16 @@ func TestProfileEndpointStaysPrivate(t *testing.T) {
 		t.Fatal("TCP endpoint exposed to renderer")
 	}
 }
+
+func TestSubscriptionUserInfoHeader(t *testing.T) {
+	header := http.Header{}
+	header.Set("subscription-userinfo", "upload=1024; download=2048;total=10737418240; expire=1786665600; junk; upload2=x")
+	metadata := subscriptionMetadataFromHeaders(header)
+	if metadata.Upload != 1024 || metadata.Download != 2048 || metadata.Total != 10737418240 || metadata.Expire != 1786665600 {
+		t.Fatalf("userinfo not parsed: %#v", metadata)
+	}
+	header.Set("subscription-userinfo", "upload=-5; download=abc")
+	if metadata := subscriptionMetadataFromHeaders(header); metadata.Upload != 0 || metadata.Download != 0 {
+		t.Fatalf("invalid userinfo accepted: %#v", metadata)
+	}
+}

@@ -37,7 +37,7 @@ On Linux, also run `GOOS=windows go vet ./...` to type-check the Windows-only fi
 
 ## Architecture
 
-**IPC chain:** `renderer.js` → `window.vpnApi` (`tauri-bridge.js`) → `invoke('vpn_*')` Tauri commands (`src-tauri/src/main.rs`) → `Backend` (`src-tauri/src/backend.rs`) → JSON lines over the child's **stdin/stdout** → `backend/main.go` request loop (`switch r.Method`: `import`, `importMany`, `connect`, `switch`, `ping`, `disconnect`, `publicIp`, `deviceInfo`, `shutdown`).
+**IPC chain:** `renderer.js` → `window.vpnApi` (`tauri-bridge.js`) → `invoke('vpn_*')` Tauri commands (`src-tauri/src/main.rs`) → `Backend` (`src-tauri/src/backend.rs`) → JSON lines over the child's **stdin/stdout** → `backend/main.go` request loop (`switch r.Method`: `import`, `importMany`, `connect`, `switch`, `ping`, `diagnose`, `disconnect`, `publicIp`, `deviceInfo`, `shutdown`).
 - Requests carry an `id`. Responses are `{id, ok, result|error}`. Messages without an `id` are events (`ready`, state, profile, traffic, log). Rust re-emits them to the WebView as `vpn:state`, `vpn:profile`, `vpn:traffic`, `vpn:log`, `vpn:error`, `vpn:update-progress` and `vpn:tray-action`.
 - In Go, stdout is reserved for IPC (`os.Stdout = os.Stderr` after the encoder is created). Never print to stdout from the core. Diagnostics go to stderr, and Rust collects them into an in-memory log of up to 1500 lines.
 - There is no TCP control port and no shell. The Tauri capability (`src-tauri/capabilities/default.json`) only grants event listen/unlisten. The CSP is strict (`script-src 'self'`, no inline scripts or styles).

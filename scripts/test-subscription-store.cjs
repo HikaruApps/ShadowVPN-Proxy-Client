@@ -20,6 +20,9 @@ assert.equal(store.validURL('https://user@example.com/sub'), false);
 assert.deepEqual(JSON.parse(JSON.stringify(store.cleanMetadata({ title: ' ShadowVPN\n', supportUrl: 'https://t.me/support', dnsDoh: 'dns.example' }))), {
   title: 'ShadowVPN', supportUrl: 'https://t.me/support', dnsDoh: 'https://dns.example/dns-query',
 });
+assert.deepEqual(JSON.parse(JSON.stringify(store.cleanMetadata({ upload: 1024, download: '2048', total: 0, expire: -1 }))), {
+  title: '', supportUrl: '', dnsDoh: '', upload: 1024, download: 2048,
+});
 
 const legacy = memoryStorage({ [store.legacyStorageKey]: 'https://legacy.example/sub' });
 let state = store.readState(legacy);

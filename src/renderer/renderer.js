@@ -164,7 +164,16 @@ const STATUS_LABEL = {
   disconnecting: "Отключение…",
 };
 
+// One-shot render hints: cards slide in after a new list, sort or category;
+// pings that just came back land with a small overshoot.
+let revealNextRender = false;
+let arrivedPingIds = new Set();
+
 function renderServerList() {
+  const reveal = revealNextRender && !reducedMotion();
+  const arrived = arrivedPingIds;
+  revealNextRender = false;
+  arrivedPingIds = new Set();
   serverList.replaceChildren();
   const visibleProfiles = filterServerProfiles(serverProfiles, selectedCategory);
   if (currentState === "disconnected" && !visibleProfiles.some(profile => profile.id === selectedGroupId)) {
@@ -177,10 +186,12 @@ function renderServerList() {
     serverList.append(empty);
     return;
   }
-  for (const profile of sortServerProfiles(visibleProfiles, pingResults, selectedSort)) {
+  for (const [index, profile] of sortServerProfiles(visibleProfiles, pingResults, selectedSort).entries()) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "server-card";
+    card.style.setProperty("--i", String(Math.min(index, 12)));
+    if (reveal) card.classList.add("reveal");
     card.classList.toggle("auto-card", Boolean(profile.auto));
     card.dataset.groupId = profile.id;
     card.classList.toggle("selected", profile.id === selectedGroupId);
@@ -232,6 +243,7 @@ function renderServerList() {
     } else {
       ping.textContent = "—";
     }
+    if (result && result !== "pending" && arrived.has(profile.id)) ping.classList.add("arrived");
     text.append(name, meta); card.append(icon, text, ping);
     card.addEventListener("click", () => {
       if (requestBusy || currentState === "connecting" || currentState === "disconnecting") return;
@@ -243,6 +255,60 @@ function renderServerList() {
     });
     serverList.append(card);
   }
+}
+
+function reducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+// Status text fades through: the old line fades out, the new one fades in with
+// a slight grow. Many places assign textContent, so the element's own setter
+// is wrapped instead of touching each of them.
+(() => {
+  const native = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
+  let shown = native.get.call(statusText);
+  let pending = null;
+  let fading = null;
+  Object.defineProperty(statusText, "textContent", {
+    configurable: true,
+    get: () => pending ?? shown,
+    set(value) {
+      const next = String(value ?? "");
+      if (next === (pending ?? shown)) return;
+      if (reducedMotion() || !statusText.isConnected) {
+        pending = null; shown = next; native.set.call(statusText, next); return;
+      }
+      pending = next;
+      if (fading) return;
+      fading = statusText.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: "ease-in", fill: "forwards" });
+      fading.finished.catch(() => {}).then(() => {
+        fading = null;
+        if (pending === null) return;
+        shown = pending; pending = null;
+        native.set.call(statusText, shown);
+        statusText.animate(
+          [{ opacity: 0, transform: "scale(.94)" }, { opacity: 1, transform: "scale(1)" }],
+          { duration: 260, easing: "cubic-bezier(.16, 1, .3, 1)", fill: "forwards" },
+        );
+      });
+    },
+  });
+})();
+
+// The block under the button changes height as the IP, location and traffic
+// come and go; the frame follows it smoothly so the button glides instead of jumping.
+(() => {
+  const frame = document.getElementById("connectionCopyFrame");
+  const content = document.getElementById("connectionCopy");
+  if (!frame || !content || typeof ResizeObserver !== "function") return;
+  new ResizeObserver(() => { frame.style.height = `${content.offsetHeight}px`; }).observe(content);
+})();
+
+function flashPowerError() {
+  powerBtn.classList.remove("error");
+  void powerBtn.offsetWidth;
+  powerBtn.classList.add("error");
+  window.setTimeout(() => powerBtn.classList.remove("error"), 1800);
 }
 
 function updateCategoryControl() {
@@ -448,9 +514,9 @@ function applyState(state) {
   dashboard.dataset.vpnState = state;
   statusText.textContent = STATUS_LABEL[state] ?? state;
 
-  powerBtn.classList.remove("connected", "connecting");
-  if (state === "connected") powerBtn.classList.add("connected");
-  if (state === "connecting" || state === "disconnecting") powerBtn.classList.add("connecting");
+  powerBtn.classList.remove("connected", "connecting", "disconnecting");
+  if (state === "connected" || state === "connecting" || state === "disconnecting") powerBtn.classList.add(state);
+  powerBtn.setAttribute("aria-label", state === "connected" ? "Отключить VPN" : "Подключить VPN");
   if (state !== "connected") clearConnectedLocation();
 
   if (state === "connecting") {
@@ -576,6 +642,126 @@ async function openLogs() {
   logsLoading = false;
 }
 
+// Connection check, as in the Android client: the computer's network, the
+// server's address, a real request through it and the internet via VPN.
+const diagnosticsOverlay = document.getElementById("diagnosticsOverlay");
+const diagnosticsMenuItem = document.getElementById("diagnosticsMenuItem");
+const diagnosticsList = document.getElementById("diagnosticsList");
+const diagnosticsVerdict = document.getElementById("diagnosticsVerdict");
+const diagnosticsTarget = document.getElementById("diagnosticsTarget");
+const diagnosticsRetryBtn = document.getElementById("diagnosticsRetryBtn");
+const closeDiagnosticsBtn = document.getElementById("closeDiagnosticsBtn");
+const DIAGNOSTIC_STEPS = [
+  ["network", "Сеть компьютера", "Есть ли интернет без VPN"],
+  ["dns", "Адрес сервера", "Находится ли сервер по имени"],
+  ["server", "Доступность сервера", "Проходит ли трафик через сервер"],
+  ["vpn", "Интернет через VPN", "Работает ли подключённый туннель"],
+];
+let diagnosticsRun = 0;
+
+function setDiagnosticsStep(id, state, detail) {
+  const row = diagnosticsList.querySelector(`[data-step="${id}"]`);
+  if (!row) return;
+  row.dataset.state = state;
+  row.querySelector("small").textContent = detail || (state === "running" ? "Проверяем…" : "");
+}
+
+function renderDiagnosticsVerdict(error = "") {
+  const state = id => diagnosticsList.querySelector(`[data-step="${id}"]`)?.dataset.state;
+  const busy = DIAGNOSTIC_STEPS.some(([id]) => ["wait", "running"].includes(state(id)));
+  let tone = "busy", title = "Проверяем…", note = "Это займёт до 15 секунд";
+  if (error) {
+    tone = "fail"; title = "Проверка не запустилась"; note = error;
+  } else if (!busy) {
+    if (state("network") === "fail") {
+      tone = "fail"; title = "Нет интернета"; note = "Компьютер не в сети: проверьте Wi-Fi или кабель";
+    } else if (state("dns") === "fail") {
+      tone = "fail"; title = "Сервер не найден"; note = "Сеть не может найти адрес сервера. Смените сеть или DNS, или обновите подписку";
+    } else if (state("server") === "fail") {
+      tone = "fail"; title = "Сервер недоступен"; note = "Выберите другой сервер или обновите подписку";
+    } else if (state("vpn") === "fail") {
+      tone = "fail"; title = "VPN не пропускает интернет"; note = "Сервер доступен, но туннель не работает. Переподключитесь";
+    } else {
+      tone = "ok"; title = "Сервер доступен";
+      note = state("vpn") === "ok" ? "Всё работает: интернет идёт через VPN" : "Можно подключаться";
+    }
+  }
+  diagnosticsVerdict.dataset.tone = tone;
+  diagnosticsVerdict.querySelector("b").textContent = title;
+  diagnosticsVerdict.querySelector("small").textContent = note;
+}
+
+async function runDiagnostics() {
+  if (requestBusy || !["disconnected", "connected"].includes(currentState)) {
+    renderDiagnosticsVerdict("Дождитесь окончания текущей операции и проверьте снова");
+    return;
+  }
+  const run = ++diagnosticsRun;
+  const profile = serverProfiles.find(item => item.id === selectedGroupId);
+  diagnosticsTarget.textContent = profile ? `Проверяем «${serverFlagAndName(profile.name).name}» и путь до него` : "Сервер не выбран";
+  diagnosticsList.replaceChildren(...DIAGNOSTIC_STEPS.map(([id, title, hint], index) => {
+    const row = document.createElement("li");
+    row.className = "diag-row";
+    row.dataset.step = id;
+    row.dataset.state = "running";
+    row.style.setProperty("--i", String(index));
+    const mark = document.createElement("i");
+    mark.className = "diag-mark";
+    const copy = document.createElement("div");
+    const heading = document.createElement("strong");
+    heading.textContent = title;
+    const detail = document.createElement("small");
+    detail.textContent = hint;
+    copy.append(heading, detail);
+    row.append(mark, copy);
+    return row;
+  }));
+  renderDiagnosticsVerdict();
+  requestBusy = true;
+  diagnosticsRetryBtn.disabled = true;
+  updatePingButton();
+  try {
+    const autoIds = [AUTO_PROFILE_ID, AUTO_NO_RU_PROFILE_ID].includes(selectedGroupId)
+      ? autoProfilesFor(selectedGroupId).map(item => item.id)
+      : [];
+    const reply = await window.vpnApi.diagnose(selectedGroupId, autoIds);
+    if (run !== diagnosticsRun) return;
+    if (!reply.ok) {
+      for (const [id] of DIAGNOSTIC_STEPS) setDiagnosticsStep(id, "skip", "Пропущено");
+      renderDiagnosticsVerdict(reply.error || "Не удалось выполнить проверку");
+      return;
+    }
+    // Steps resolve one after another so the eye can follow the path.
+    for (const [index, step] of (reply.result?.steps || []).entries()) {
+      if (index) await new Promise(resolve => window.setTimeout(resolve, reducedMotion() ? 0 : 140));
+      if (run !== diagnosticsRun) return;
+      setDiagnosticsStep(String(step.id), String(step.state), String(step.detail || ""));
+    }
+    renderDiagnosticsVerdict();
+  } finally {
+    requestBusy = false;
+    diagnosticsRetryBtn.disabled = false;
+    updatePingButton();
+  }
+}
+
+function openDiagnostics() {
+  setMenuOpen(false);
+  diagnosticsOverlay.hidden = false;
+  closeDiagnosticsBtn.focus({ preventScroll: true });
+  void runDiagnostics();
+}
+
+async function closeDiagnostics() {
+  if (diagnosticsOverlay.hidden) return;
+  diagnosticsRun += 1;
+  if (!reducedMotion()) {
+    await diagnosticsOverlay.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: "ease-in" }).finished;
+  }
+  diagnosticsOverlay.hidden = true;
+  menuBtn.focus({ preventScroll: true });
+}
+
 async function closeLogs() {
   if (logsOverlay.hidden) return;
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -584,6 +770,63 @@ async function closeLogs() {
   }
   logsOverlay.hidden = true;
   menuBtn.focus({ preventScroll: true });
+}
+
+// Subscription cards in "Управление подписками": traffic used of the limit
+// and the end date, from the panel's subscription-userinfo header.
+const subscriptionQuotaSlot = document.getElementById("subscriptionQuotaSlot");
+
+function hasQuota(item) {
+  return Boolean(item && (item.total || item.upload || item.download || item.expire));
+}
+
+function quotaCard(item) {
+  const used = (item.upload || 0) + (item.download || 0);
+  const total = item.total || 0;
+  const unlimited = total === 0;
+  const share = unlimited ? 1 : Math.min(1, used / total);
+  const card = document.createElement("section");
+  card.className = "quota-card";
+  card.setAttribute("aria-label", "Остаток подписки");
+  const row = document.createElement("div");
+  row.className = "quota-row";
+  const title = document.createElement("span");
+  title.textContent = "Трафик";
+  const value = document.createElement("b");
+  value.textContent = unlimited ? `${used ? `${formatBytes(used)} · ` : ""}без лимита` : `${formatBytes(used)} из ${formatBytes(total)}`;
+  row.append(title, value);
+  const track = document.createElement("div");
+  track.className = "quota-track";
+  const bar = document.createElement("i");
+  bar.classList.toggle("unlimited", unlimited);
+  bar.classList.toggle("warning", !unlimited && share >= .85 && share < 1);
+  bar.classList.toggle("exhausted", !unlimited && share >= 1);
+  track.append(bar);
+  const expire = document.createElement("small");
+  if (!item.expire) {
+    expire.textContent = "Без срока действия";
+  } else {
+    const endsAt = new Date(item.expire * 1000);
+    const date = endsAt.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+    const daysLeft = Math.ceil((endsAt.getTime() - Date.now()) / 86400000);
+    if (daysLeft <= 0) {
+      expire.textContent = `Подписка истекла ${date}`;
+      expire.classList.add("expired");
+    } else if (daysLeft <= 3) {
+      expire.textContent = `Осталось ${daysLeft} ${daysLeft === 1 ? "день" : "дня"} · до ${date}`;
+      expire.classList.add("warning");
+    } else {
+      expire.textContent = `Действует до ${date}`;
+    }
+  }
+  card.append(row, track, expire);
+  // The bar grows in from empty once the card is on screen.
+  window.requestAnimationFrame(() => window.requestAnimationFrame(() => { bar.style.transform = `scaleX(${share})`; }));
+  return card;
+}
+
+function renderQuota(edited) {
+  subscriptionQuotaSlot.replaceChildren(...(hasQuota(edited) ? [quotaCard(edited)] : []));
 }
 
 function updateDNSControl() {
@@ -949,6 +1192,7 @@ async function changeConnection(action = "toggle") {
         : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL, subscriptionDoh);
     if (!reply.ok) {
       statusText.textContent = reply.error;
+      if (!disconnecting) flashPowerError();
     } else if (!disconnecting) {
       setConnectedLocation(reply.result);
       void loadProtectedIp();
@@ -981,6 +1225,7 @@ async function runPingTest() {
     if (!reply.ok) throw new Error(reply.error);
     for (const result of reply.result) pingResults.set(result.id, result);
     refreshAutoPingForGroup();
+    arrivedPingIds = new Set(serverProfiles.map(profile => profile.id));
     renderServerList();
     const realResults = reply.result.filter(result => !serverProfiles.find(profile => profile.id === result.id)?.auto);
     const available = realResults.filter(result => result.available).length;
@@ -1154,6 +1399,7 @@ function applyImportedProfiles(imported, previousSelection = selectedGroupId) {
   groupState = groupStore.writeState(groupState);
   selectedGroupId = serverProfiles.some(profile => profile.id === previousSelection) ? previousSelection : serverProfiles[0].id;
   pingResults.clear();
+  revealNextRender = true;
   renderServerList();
 }
 
@@ -1369,6 +1615,7 @@ function renderSubscriptionManager() {
   subscriptionDohInfo.textContent = edited?.dnsDoh ? new URL(edited.dnsDoh).hostname : "";
   removeSubscriptionBtn.hidden = !edited;
   saveSubscriptionBtn.textContent = edited ? "Сохранить" : "Добавить подписку";
+  renderQuota(addingSubscription ? null : edited);
   addSubscriptionBtn.disabled = requestBusy || subscriptionState.items.length >= subscriptionStore.maxSubscriptions;
 }
 
@@ -1572,6 +1819,7 @@ sortMenu.addEventListener("click", event => {
   try { localStorage.setItem(sortStorageKey, selectedSort); } catch { /* Keep it for this session. */ }
   setSortMenuOpen(false);
   updateSortControl();
+  revealNextRender = true;
   renderServerList();
   const hasResults = [...pingResults.values()].some(result => result && result !== "pending");
   if (selectedSort === "latency" && !hasResults) void runPingTest();
@@ -1581,6 +1829,7 @@ serverCategoryTabs.addEventListener("click", event => {
   if (!tab || !categoryLabels.has(tab.dataset.serverCategory)) return;
   selectedCategory = tab.dataset.serverCategory;
   updateCategoryControl();
+  revealNextRender = true;
   renderServerList();
   updatePingButton();
   if (currentState === "disconnected" && !requestBusy) {
@@ -1588,6 +1837,7 @@ serverCategoryTabs.addEventListener("click", event => {
   }
 });
 logsMenuItem.addEventListener("click", openLogs);
+diagnosticsMenuItem.addEventListener("click", openDiagnostics);
 syncSubscriptionBtn.addEventListener("click", () => { void syncSubscription("manual"); });
 settingsMenuItem.addEventListener("click", openSettings);
 groupsMenuItem.addEventListener("click", openGroups);
@@ -1752,6 +2002,9 @@ removeSubscriptionBtn.addEventListener("click", () => { void removeManagedSubscr
 closeSubscriptionsBtn.addEventListener("click", () => { void closeSubscriptions(); });
 subscriptionsOverlay.addEventListener("click", event => { if (event.target === subscriptionsOverlay) void closeSubscriptions(); });
 closeLogsBtn.addEventListener("click", closeLogs);
+closeDiagnosticsBtn.addEventListener("click", closeDiagnostics);
+diagnosticsOverlay.addEventListener("click", event => { if (event.target === diagnosticsOverlay) closeDiagnostics(); });
+diagnosticsRetryBtn.addEventListener("click", () => void runDiagnostics());
 logsOverlay.addEventListener("click", event => { if (event.target === logsOverlay) closeLogs(); });
 closeSettingsBtn.addEventListener("click", closeSettings);
 settingsOverlay.addEventListener("click", event => { if (event.target === settingsOverlay) closeSettings(); });
@@ -1789,6 +2042,7 @@ document.addEventListener("keydown", event => {
   else if (!groupsOverlay.hidden) closeGroups();
   else if (!subscriptionsOverlay.hidden) void closeSubscriptions();
   else if (!logsOverlay.hidden) closeLogs();
+  else if (!diagnosticsOverlay.hidden) closeDiagnostics();
   else if (menuOpen) setMenuOpen(false);
   else if (sortMenuOpen) setSortMenuOpen(false);
 });
