@@ -774,14 +774,13 @@ async function closeLogs() {
 
 // Subscription cards in "Управление подписками": traffic used of the limit
 // and the end date, from the panel's subscription-userinfo header.
-const subscriptionQuotaList = document.getElementById("subscriptionQuotaList");
 const subscriptionQuotaSlot = document.getElementById("subscriptionQuotaSlot");
 
 function hasQuota(item) {
   return Boolean(item && (item.total || item.upload || item.download || item.expire));
 }
 
-function quotaCard(item, showTitle) {
+function quotaCard(item) {
   const used = (item.upload || 0) + (item.download || 0);
   const total = item.total || 0;
   const unlimited = total === 0;
@@ -792,7 +791,7 @@ function quotaCard(item, showTitle) {
   const row = document.createElement("div");
   row.className = "quota-row";
   const title = document.createElement("span");
-  title.textContent = showTitle ? subscriptionDisplayName(item) : "Трафик";
+  title.textContent = "Трафик";
   const value = document.createElement("b");
   value.textContent = unlimited ? `${used ? `${formatBytes(used)} · ` : ""}без лимита` : `${formatBytes(used)} из ${formatBytes(total)}`;
   row.append(title, value);
@@ -827,8 +826,7 @@ function quotaCard(item, showTitle) {
 }
 
 function renderQuota(edited) {
-  subscriptionQuotaSlot.replaceChildren(...(hasQuota(edited) ? [quotaCard(edited, false)] : []));
-  subscriptionQuotaList.replaceChildren(...(edited ? [] : subscriptionState.items.filter(hasQuota).map(item => quotaCard(item, true))));
+  subscriptionQuotaSlot.replaceChildren(...(hasQuota(edited) ? [quotaCard(edited)] : []));
 }
 
 function updateDNSControl() {
