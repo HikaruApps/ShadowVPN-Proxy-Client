@@ -47,8 +47,7 @@ body {
   grid-template-columns: clamp(320px, 45vw, 410px) minmax(0, 1fr);
   grid-template-rows: 40px minmax(0, 1fr);
   grid-template-areas: "topbar topbar" "servers connect";
-  --col-gap: clamp(24px, 3.5vw, 38px);
-  gap: 28px var(--col-gap);
+  gap: 28px clamp(24px, 3.5vw, 38px);
   padding: 28px 24px 24px;
 }
 
@@ -1296,7 +1295,7 @@ button:disabled { cursor: wait; opacity: .65; }
 @media (max-width: 780px) {
   .app {
     grid-template-columns: 320px minmax(0, 1fr);
-    --col-gap: 20px;
+    column-gap: 20px;
     padding-inline: 20px;
   }
 
@@ -1438,14 +1437,9 @@ button:disabled { cursor: wait; opacity: .65; }
   .server-ping.pending { animation: none !important; }
 }
 
-/* Subscription card in the top bar: traffic used of the limit and the end
-   date, from the panel's subscription-userinfo header. */
-/* The top bar follows the page columns, so the card starts exactly at the
-   divider of the server list and fills the space up to the menu button. */
-.topbar { display: grid; grid-template-columns: subgrid; align-items: center; }
-.topbar-actions { min-width: 0; align-items: center; margin-left: calc(-1 * var(--col-gap) + 14px); }
-.topbar-actions .menu-anchor { margin-left: auto; }
-.quota-card { flex: 1 1 auto; min-width: 0; padding: 11px 15px 12px; border: 1px solid #222; border-radius: 12px; background: #0d0d0d; animation: location-reveal 420ms var(--motion) both; }
+/* Subscription card in the main menu, above "Управление подписками": traffic
+   used of the limit and the end date, from the subscription-userinfo header. */
+.quota-card { margin: 6px 6px 4px; padding: 11px 13px 12px; border: 1px solid #222; border-radius: 12px; background: #0f0f0f; }
 .quota-card[hidden] { display: none; }
 .quota-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 12px; line-height: 1.2; }
 .quota-row span { min-width: 0; overflow: hidden; color: #9a9a9a; text-overflow: ellipsis; white-space: nowrap; }

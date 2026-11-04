@@ -26,11 +26,6 @@
     <header class="topbar">
       <div class="wordmark">SHADOW<span class="wordmark-accent">VPN</span></div>
       <div class="topbar-actions">
-        <section class="quota-card" id="quotaCard" hidden aria-label="Остаток подписки">
-          <div class="quota-row"><span id="quotaTitle">Подписка</span><b id="quotaValue"></b></div>
-          <div class="quota-track"><i id="quotaProgress"></i></div>
-          <small id="quotaExpire"></small>
-        </section>
         <div class="menu-anchor">
           <button class="icon-btn" id="menuBtn" aria-label="Открыть меню" title="Меню" aria-expanded="false" aria-controls="appMenu">
             <svg viewBox="0 0 24 24" width="18" height="18">
@@ -69,6 +64,11 @@
               <span class="menu-item-copy"><strong>Группы серверов</strong><small>Настроить серверы для Auto</small></span>
             </button>
             <div class="menu-separator" role="separator"></div>
+            <section class="quota-card" id="quotaCard" role="none" hidden aria-label="Остаток подписки">
+              <div class="quota-row"><span id="quotaTitle">Подписка</span><b id="quotaValue"></b></div>
+              <div class="quota-track"><i id="quotaProgress"></i></div>
+              <small id="quotaExpire"></small>
+            </section>
             <button class="menu-item compact" id="manageSubscriptionsBtn" type="button" role="menuitem">
               <span class="menu-item-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="M7 7h12v12H7z"/><path d="M5 16H3V3h13v2"/></svg>
