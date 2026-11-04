@@ -1440,7 +1440,6 @@ button:disabled { cursor: wait; opacity: .65; }
 /* Subscription card in the top bar: traffic used of the limit and the end
    date, from the panel's subscription-userinfo header. */
 .topbar-actions { align-items: center; }
-.topbar-actions > .pill-btn { height: 40px; }
 .quota-card { width: 236px; padding: 7px 12px 8px; border: 1px solid #222; border-radius: 12px; background: #0d0d0d; animation: location-reveal 420ms var(--motion) both; }
 .quota-card[hidden] { display: none; }
 .quota-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 11px; line-height: 1.2; }
