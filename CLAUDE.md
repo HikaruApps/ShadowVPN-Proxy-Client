@@ -68,10 +68,6 @@ On Linux, also run `GOOS=windows go vet ./...` to type-check the Windows-only fi
 - `.github/workflows/release.yml` automates this: publishing a GitHub Release tagged `v<version>` (matching all version fields) runs `build-windows.ps1` on `windows-latest` with the key from repository secrets, uploads the `.exe`/`.exe.sig` to that release, then commits `updates/latest.json` to `main`. It can be re-run for an existing tag via `workflow_dispatch`.
 - `bin/shadowvpn-core.exe` is a build output (gitignored). `bin/wintun.dll` is committed. Xray-core is pinned to a specific commit in `backend/go.mod`.
 
-## Leftovers
-
-`src/main/` (Electron `main.js`/`preload.js`) and `src/shared/servers.js` come from the earlier Electron version. Tauri doesn't load them, and no current code references them.
-
 ## License
 
 AGPL-3.0-only. Third-party licenses are in `licenses/` and `src/renderer/assets/*.LICENSE.txt`.
