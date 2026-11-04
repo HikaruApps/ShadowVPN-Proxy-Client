@@ -26,12 +26,21 @@
     } catch { return ""; }
   }
 
+  // Traffic counters (bytes) and expiry (Unix seconds) from subscription-userinfo;
+  // only present, positive whole numbers are kept.
+  const quotaFields = ["upload", "download", "total", "expire"];
+
   function cleanMetadata(value) {
-    return {
+    const metadata = {
       title: cleanTitle(value?.title),
       supportUrl: cleanHTTPSURL(value?.supportUrl),
       dnsDoh: cleanHTTPSURL(value?.dnsDoh, "/dns-query", false),
     };
+    for (const field of quotaFields) {
+      const number = Number(value?.[field]);
+      if (Number.isSafeInteger(number) && number > 0) metadata[field] = number;
+    }
+    return metadata;
   }
 
   function cleanItem(value) {
@@ -126,7 +135,12 @@
     const clean = cleanMetadata(metadata);
     return {
       ...normalized,
-      items: normalized.items.map(item => item.id === id ? { ...item, ...clean } : item),
+      items: normalized.items.map(item => {
+        if (item.id !== id) return item;
+        const next = { ...item, ...clean };
+        for (const field of quotaFields) if (!(field in clean)) delete next[field];
+        return next;
+      }),
     };
   }
 

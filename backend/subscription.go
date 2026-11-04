@@ -71,6 +71,11 @@ type subscriptionMetadata struct {
 	Title      string `json:"title,omitempty"`
 	SupportURL string `json:"supportUrl,omitempty"`
 	DNSDoH     string `json:"dnsDoh,omitempty"`
+	// From subscription-userinfo: bytes used and allowed, expiry as Unix time.
+	Upload   int64 `json:"upload,omitempty"`
+	Download int64 `json:"download,omitempty"`
+	Total    int64 `json:"total,omitempty"`
+	Expire   int64 `json:"expire,omitempty"`
 }
 
 func cleanHeaderText(value string, maxLength int) string {
@@ -141,11 +146,34 @@ func normalizedHTTPSURL(value string, defaultPath string, allowQuery bool) strin
 }
 
 func subscriptionMetadataFromHeaders(header http.Header) subscriptionMetadata {
-	return subscriptionMetadata{
+	metadata := subscriptionMetadata{
 		Title:      decodeProfileTitle(header.Get("profile-title")),
 		SupportURL: normalizedHTTPSURL(header.Get("support-url"), "", true),
 		DNSDoH:     normalizedHTTPSURL(header.Get("dns-doh"), "/dns-query", false),
 	}
+	// subscription-userinfo: upload=…; download=…; total=…; expire=… (Remnawave,
+	// Marzban, 3x-ui). total=0 means no limit, expire=0 means no end date.
+	for _, part := range strings.Split(header.Get("subscription-userinfo"), ";") {
+		key, raw, found := strings.Cut(strings.TrimSpace(part), "=")
+		if !found {
+			continue
+		}
+		value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if err != nil || value < 0 {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "upload":
+			metadata.Upload = value
+		case "download":
+			metadata.Download = value
+		case "total":
+			metadata.Total = value
+		case "expire":
+			metadata.Expire = value
+		}
+	}
+	return metadata
 }
 
 type subscriptionLogf func(format string, values ...any)

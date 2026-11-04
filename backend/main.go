@@ -679,6 +679,16 @@ func main() {
 					}
 					w.logf("latency test completed method=%s", method)
 				}
+			case "diagnose":
+				w.logf("connection check requested profile_id=%s connected=%t", r.ProfileID, w.instance != nil)
+				var steps []diagnoseStep
+				steps, err = w.diagnose(ctx, r.ProfileID, r.AutoProfileIDs)
+				if err == nil {
+					result = map[string]any{"steps": steps}
+					for _, step := range steps {
+						w.logf("connection check step=%s state=%s", step.ID, step.State)
+					}
+				}
 			case "disconnect":
 				w.logf("disconnect requested")
 				w.setState("disconnecting")

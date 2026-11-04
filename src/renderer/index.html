@@ -26,6 +26,11 @@
     <header class="topbar">
       <div class="wordmark">SHADOW<span class="wordmark-accent">VPN</span></div>
       <div class="topbar-actions">
+        <section class="quota-card" id="quotaCard" hidden aria-label="Остаток подписки">
+          <div class="quota-row"><span id="quotaTitle">Подписка</span><b id="quotaValue"></b></div>
+          <div class="quota-track"><i id="quotaProgress"></i></div>
+          <small id="quotaExpire"></small>
+        </section>
         <div class="menu-anchor">
           <button class="icon-btn" id="menuBtn" aria-label="Открыть меню" title="Меню" aria-expanded="false" aria-controls="appMenu">
             <svg viewBox="0 0 24 24" width="18" height="18">
@@ -38,6 +43,12 @@
                 <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>
               </span>
               <span class="menu-item-copy"><strong>Логи</strong><small>Диагностика Xray и TUN</small></span>
+            </button>
+            <button class="menu-item" id="diagnosticsMenuItem" type="button" role="menuitem">
+              <span class="menu-item-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>
+              </span>
+              <span class="menu-item-copy"><strong>Диагностика</strong><small>Проверить сеть и сервер</small></span>
             </button>
             <button class="menu-item" id="syncSubscriptionBtn" type="button" role="menuitem">
               <span class="menu-item-icon" aria-hidden="true">
@@ -121,10 +132,6 @@
           <span class="signal-bars" aria-hidden="true"><i></i><i></i><i></i></span>
           <p class="connect-status" id="statusText" aria-live="polite">Нажмите, чтобы подключиться</p>
         </div>
-        <button class="ping-pill" id="pingPill" type="button" hidden aria-label="Проверить задержку сервера">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>
-          <span id="pingPillValue">Проверить</span>
-        </button>
         <div class="connected-location" id="connectedLocation" hidden aria-live="polite">
           <span class="connected-location-flag" id="connectedLocationFlag" aria-hidden="true"></span>
           <span class="connected-location-name" id="connectedLocationName"></span>
@@ -325,6 +332,27 @@
       </div>
       <div class="logs-output" id="logsOutput" tabindex="0" aria-label="Диагностические логи"></div>
       <p class="logs-privacy">Логи хранятся только в памяти до закрытия приложения. Ключи и серверные URI скрываются автоматически.</p>
+    </section>
+  </div>
+
+  <div class="diagnostics-overlay" id="diagnosticsOverlay" hidden>
+    <section class="diagnostics-panel" role="dialog" aria-modal="true" aria-labelledby="diagnosticsTitle">
+      <header class="logs-header">
+        <div>
+          <h2 id="diagnosticsTitle">Диагностика</h2>
+          <p id="diagnosticsTarget">Проверяем сервер и путь до него</p>
+        </div>
+        <button class="logs-close" id="closeDiagnosticsBtn" type="button" aria-label="Закрыть диагностику">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+        </button>
+      </header>
+      <div class="diagnostics-body">
+        <div class="diag-verdict" id="diagnosticsVerdict" data-tone="busy" aria-live="polite">
+          <b>Проверяем…</b><small>Это займёт до 15 секунд</small>
+        </div>
+        <ol class="diag-list" id="diagnosticsList"></ol>
+        <button class="diag-retry" id="diagnosticsRetryBtn" type="button">Проверить снова</button>
+      </div>
     </section>
   </div>
 

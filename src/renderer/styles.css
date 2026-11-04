@@ -465,7 +465,8 @@ body {
 .logs-overlay,
 .settings-overlay,
 .groups-overlay,
-.subscriptions-overlay {
+.subscriptions-overlay,
+.diagnostics-overlay {
   position: fixed;
   z-index: 100;
   inset: 0;
@@ -1405,19 +1406,6 @@ button:disabled { cursor: wait; opacity: .65; }
 @keyframes bars-wave { 0%, 100% { opacity: .18; } 40% { opacity: 1; } }
 @keyframes bars-breathe { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(.72); } }
 
-/* Latency of the server in use, like the Android client. */
-.ping-pill { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border: 1px solid #2a2a2a; border-radius: 14px; background: #0d0d0d; color: #a6a6a6; font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; cursor: pointer; animation: location-reveal 420ms var(--motion) both; transition: transform 160ms var(--motion), border-color 200ms ease, color 260ms ease; }
-.ping-pill[hidden] { display: none; }
-.ping-pill:hover { border-color: #3c3c3c; }
-.ping-pill:active { transform: scale(.96); }
-.ping-pill svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.ping-pill.good { color: var(--ok); }
-.ping-pill.slow { color: var(--warn); }
-.ping-pill.critical, .ping-pill.unavailable { color: var(--bad); }
-.ping-pill.pending svg { animation: logo-pulse 900ms ease-in-out infinite; }
-.ping-pill.pending span { color: #666; }
-.ping-pill.arrived span { animation: ping-arrive 420ms var(--spring) both; }
-
 /* Server list: cards come in one after another; a ping lands with a little
    overshoot, a failed one shakes once; pending pings are skeleton bars. */
 .server-card.reveal { animation: card-reveal 420ms var(--motion) both; animation-delay: calc(var(--i, 0) * 45ms); }
@@ -1448,3 +1436,52 @@ button:disabled { cursor: wait; opacity: .65; }
   .app[data-vpn-state="connected"] .signal-bars i { opacity: 1; }
   .server-ping.pending { animation: none !important; }
 }
+
+/* Subscription card in the top bar: traffic used of the limit and the end
+   date, from the panel's subscription-userinfo header. */
+.topbar-actions { align-items: center; }
+.topbar-actions > .pill-btn { height: 40px; }
+.quota-card { width: 236px; padding: 7px 12px 8px; border: 1px solid #222; border-radius: 12px; background: #0d0d0d; animation: location-reveal 420ms var(--motion) both; }
+.quota-card[hidden] { display: none; }
+.quota-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 11px; line-height: 1.2; }
+.quota-row span { min-width: 0; overflow: hidden; color: #9a9a9a; text-overflow: ellipsis; white-space: nowrap; }
+.quota-row b { flex: 0 0 auto; color: #dedede; font-weight: 550; font-variant-numeric: tabular-nums; }
+.quota-track { position: relative; height: 3px; margin-top: 6px; overflow: hidden; border-radius: 2px; background: #222; }
+.quota-track i { position: absolute; inset: 0; border-radius: inherit; background: #d6d6d6; transform: scaleX(0); transform-origin: left center; transition: transform 600ms var(--motion), background 300ms ease; }
+.quota-track i.unlimited { transform: scaleX(1) !important; background: #3a3a3a; }
+.quota-track i.warning { background: var(--warn); }
+.quota-track i.exhausted { background: var(--bad); }
+.quota-card small { display: block; margin-top: 5px; color: #6f6f6f; font-size: 10px; line-height: 1.2; }
+.quota-card small.warning { color: var(--warn); }
+.quota-card small.expired { color: var(--bad); }
+@media (max-width: 860px) { .quota-card { width: 188px; } }
+
+/* Connection check: a verdict and the four steps a connection needs. */
+.diagnostics-panel { width: min(520px, 100%); max-height: calc(100vh - 56px); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid #2b2b2b; border-radius: 20px; background: #0d0d0d; box-shadow: 0 28px 90px rgba(0, 0, 0, .72), inset 0 1px 0 rgba(255, 255, 255, .035); animation: logs-reveal 420ms var(--motion); }
+.diagnostics-panel .logs-header p { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 400px; }
+.diagnostics-body { display: flex; flex-direction: column; gap: 12px; padding: 16px 18px 18px; overflow-y: auto; }
+.diag-verdict { display: flex; flex-direction: column; gap: 4px; padding: 13px 15px; border: 1px solid #262626; border-radius: 14px; background: #111; transition: border-color 300ms ease, background 300ms ease; }
+.diag-verdict b { color: #e6e6e6; font-size: 15px; font-weight: 600; }
+.diag-verdict small { color: #8d8d8d; font-size: 12px; }
+.diag-verdict[data-tone="ok"] { border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 8%, #111); }
+.diag-verdict[data-tone="ok"] b { color: var(--ok); }
+.diag-verdict[data-tone="fail"] { border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: color-mix(in srgb, var(--bad) 8%, #111); }
+.diag-verdict[data-tone="fail"] b { color: var(--bad); }
+.diag-list { list-style: none; overflow: hidden; border: 1px solid #222; border-radius: 14px; background: #0f0f0f; }
+.diag-row { display: flex; align-items: center; gap: 13px; padding: 12px 15px; animation: card-reveal 320ms var(--motion) both; animation-delay: calc(var(--i, 0) * 60ms); transition: opacity 260ms ease; }
+.diag-row + .diag-row { border-top: 1px solid #1c1c1c; }
+.diag-row div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.diag-row strong { color: #e2e2e2; font-size: 13px; font-weight: 550; }
+.diag-row small { color: #858585; font-size: 11.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.diag-mark { position: relative; flex: 0 0 20px; width: 20px; height: 20px; border: 2px solid #333; border-radius: 50%; transition: background 260ms ease, border-color 260ms ease; }
+.diag-row[data-state="running"] .diag-mark { border-top-color: #bbb; animation: orb-spin 800ms linear infinite; }
+.diag-row[data-state="ok"] .diag-mark { border-color: var(--ok); background: var(--ok); animation: ping-arrive 360ms var(--spring) both; }
+.diag-row[data-state="ok"] .diag-mark::after { content: ""; position: absolute; left: 5px; top: 1.5px; width: 4.5px; height: 9px; border: solid #0d0d0d; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.diag-row[data-state="fail"] .diag-mark { border-color: var(--bad); background: var(--bad); animation: ping-arrive 360ms var(--spring) both; }
+.diag-row[data-state="fail"] .diag-mark::after { content: "!"; position: absolute; inset: 0; display: grid; place-items: center; color: #0d0d0d; font-size: 12px; font-weight: 800; line-height: 16px; }
+.diag-row[data-state="fail"] small { color: var(--bad); }
+.diag-row[data-state="skip"] { opacity: .5; }
+.diag-retry { height: 40px; border: 1px solid #2a2a2a; border-radius: 12px; background: #141414; color: #e2e2e2; font: inherit; font-size: 13px; font-weight: 550; cursor: pointer; transition: background 200ms ease, transform 160ms var(--motion); }
+.diag-retry:hover:not(:disabled) { background: #1b1b1b; }
+.diag-retry:active:not(:disabled) { transform: scale(.98); }
+@media (prefers-reduced-motion: reduce) { .quota-track i { transition: none; } }

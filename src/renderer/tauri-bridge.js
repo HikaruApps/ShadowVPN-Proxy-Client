@@ -46,6 +46,7 @@
     switchServer: (profileId, dns = 'cloudflare', dnsServers = [], fragmentation = false, killSwitch = false, autoProfileIds = [], routeMode = 'full', directDomains = [], geoIpUrl = '', geoSiteUrl = '', dnsDoh = '') => call('vpn_connect', { profileId, dns, dnsServers, fragmentation, killSwitch, autoProfileIds, routeMode, directDomains, geoIpUrl, geoSiteUrl, dnsDoh, replaceCurrent: true }),
     disconnect: () => call('vpn_disconnect'),
     ping: (pingMethod = 'tcp') => call('vpn_ping', { pingMethod }),
+    diagnose: (profileId, autoProfileIds = []) => call('vpn_diagnose', { profileId, autoProfileIds }),
     publicIp: (masked = false) => call('vpn_public_ip', { masked }),
     deviceInfo: () => call('vpn_device_info'),
     checkUpdate: () => call('vpn_check_update'),

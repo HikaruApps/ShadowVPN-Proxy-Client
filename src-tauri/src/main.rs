@@ -253,6 +253,27 @@ async fn vpn_ping(
     call(&service, "ping", json!({"pingMethod":ping_method})).await
 }
 #[tauri::command]
+async fn vpn_diagnose(
+    profile_id: String,
+    auto_profile_ids: Option<Vec<String>>,
+    service: State<'_, Service>,
+) -> Result<Value, String> {
+    let auto_profile_ids = auto_profile_ids.unwrap_or_default();
+    let valid_id = |id: &String| id.len() == 24 && id.bytes().all(|b| b.is_ascii_hexdigit());
+    if !valid_id(&profile_id)
+        || auto_profile_ids.len() > 512
+        || !auto_profile_ids.iter().all(valid_id)
+    {
+        return Err("Выберите сервер из загруженной подписки".into());
+    }
+    call(
+        &service,
+        "diagnose",
+        json!({"profileId":profile_id,"autoProfileIds":auto_profile_ids}),
+    )
+    .await
+}
+#[tauri::command]
 async fn vpn_public_ip(masked: bool, service: State<'_, Service>) -> Result<Value, String> {
     query(&service, "publicIp", json!({"masked":masked})).await
 }
@@ -572,6 +593,7 @@ fn main() {
             vpn_disconnect,
             vpn_ping,
             vpn_public_ip,
+            vpn_diagnose,
             vpn_device_info,
             vpn_check_update,
             vpn_install_update,
