@@ -31,6 +31,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-windows.ps1
 
 Релизная сборка также подписывает NSIS-установщик, создаёт файл `.exe.sig` и обновляет `updates/latest.json`. Локальные `src-tauri\.updater\shadowvpn.key` и `shadowvpn.key.password` игнорируются Git: оба файла необходимо вместе сохранить в надёжном резервном хранилище и никогда не публиковать. Для CI вместо файлов используются секреты `TAURI_SIGNING_PRIVATE_KEY` и `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Файлы `.exe` и `.exe.sig` нужно приложить к GitHub Release с тегом текущей версии, после чего отправить созданный `updates/latest.json` в ветку `main`.
 
+### Автоматический релиз через GitHub Actions
+
+Workflow `.github/workflows/release.yml` собирает и подписывает релиз сам. Один раз добавьте в репозиторий секреты (Settings → Secrets and variables → Actions): `TAURI_SIGNING_PRIVATE_KEY` — содержимое файла `src-tauri\.updater\shadowvpn.key`, и `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — содержимое `shadowvpn.key.password`. Дальше для каждого релиза:
+
+1. Поднимите версию в `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `backend/identity.go` и README и влейте это в `main`.
+2. На GitHub создайте релиз с тегом `v<версия>` на ветке `main`, напишите описание и опубликуйте.
+3. Workflow проверит, что тег совпадает с версией, прогонит тесты, соберёт и подпишет установщик, приложит `.exe` и `.exe.sig` к релизу и только после этого закоммитит новый `updates/latest.json` в `main`. Ход сборки виден на вкладке Actions; пересобрать релиз можно там же через Run workflow с указанием тега.
+
 ## Что уже работает
 
 - Диагностика в меню, как в Android-клиенте: по шагам проверяет сеть компьютера, адрес сервера, доступность сервера настоящим HTTPS-запросом и, при активном VPN, интернет через туннель; сверху — понятный итог, IP-адреса маскируются. Для «Авто» проверяются до четырёх кандидатов.

@@ -65,6 +65,7 @@ On Linux, also run `GOOS=windows go vet ./...` to type-check the Windows-only fi
 - The version appears in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `backend/identity.go` (`appVersion`, sent as the subscription `User-Agent` and asserted in `identity_test.go`) and the README title. Bump all of them together.
 - The updater reads `updates/latest.json` from `main` on GitHub (raw). `scripts/write-update-manifest.ps1` generates it from the signed NSIS build. The release `.exe` and `.exe.sig` go to the GitHub Release tagged `v<version>`.
 - Signing keys live in `src-tauri/.updater/` (gitignored), or come from the `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` env vars.
+- `.github/workflows/release.yml` automates this: publishing a GitHub Release tagged `v<version>` (matching all version fields) runs `build-windows.ps1` on `windows-latest` with the key from repository secrets, uploads the `.exe`/`.exe.sig` to that release, then commits `updates/latest.json` to `main`. It can be re-run for an existing tag via `workflow_dispatch`.
 - `bin/shadowvpn-core.exe` is a build output (gitignored). `bin/wintun.dll` is committed. Xray-core is pinned to a specific commit in `backend/go.mod`.
 
 ## Leftovers

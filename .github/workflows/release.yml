@@ -1,0 +1,109 @@
+# Builds, signs and attaches the Windows installer when a GitHub Release is
+# published, then points the in-app updater at it.
+#
+# Release flow:
+#   1. Merge the version bump into main (package.json, Cargo.toml,
+#      tauri.conf.json, backend/identity.go, README).
+#   2. On GitHub, Draft a new release with tag v<version> on main, write the
+#      notes and publish it.
+#   3. This workflow runs the tests, builds the NSIS installer, signs it with
+#      the updater key, uploads the .exe and .exe.sig to that release, and
+#      only then commits updates/latest.json to main, so clients never see an
+#      update whose files are not there yet.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           contents of src-tauri/.updater/shadowvpn.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  contents of src-tauri/.updater/shadowvpn.key.password
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild, e.g. v0.26.0
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check that the tag matches the app version
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauri = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $core = (Select-String -Path backend/identity.go -Pattern 'appVersion = "([^"]+)"').Matches[0].Groups[1].Value
+          if ($env:TAG -ne "v$version") { throw "Tag $env:TAG does not match package.json version $version. Bump the version first." }
+          if ($tauri -ne $version -or $core -ne $version) { throw "Versions disagree: package.json=$version tauri.conf.json=$tauri identity.go=$core" }
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "Repository secret TAURI_SIGNING_PRIVATE_KEY is not set." }
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust (MSVC)
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Test, build and sign
+        shell: pwsh
+        run: ./build-windows.ps1
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Attach the installer to the release
+        shell: pwsh
+        run: |
+          $version = $env:TAG.TrimStart('v')
+          $bundle = "src-tauri/target/release/bundle/nsis"
+          gh release upload $env:TAG "$bundle/ShadowVPN_${version}_x64-setup.exe" "$bundle/ShadowVPN_${version}_x64-setup.exe.sig" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Publish the updater manifest to main
+        shell: pwsh
+        run: |
+          $manifest = Join-Path $env:RUNNER_TEMP latest.json
+          Copy-Item updates/latest.json $manifest
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B main origin/main
+          Copy-Item $manifest updates/latest.json -Force
+          git add updates/latest.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { Write-Host "updates/latest.json is already current"; exit 0 }
+          git commit -m "chore: refresh $env:TAG updater manifest"
+          git push origin main
