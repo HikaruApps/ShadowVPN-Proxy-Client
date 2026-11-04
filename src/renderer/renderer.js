@@ -772,51 +772,66 @@ async function closeLogs() {
   menuBtn.focus({ preventScroll: true });
 }
 
-// Subscription card in the top bar: traffic used and the end date of the
-// subscription in view (the selected one, else the first that reports them).
-const quotaCard = document.getElementById("quotaCard");
-const quotaTitle = document.getElementById("quotaTitle");
-const quotaValue = document.getElementById("quotaValue");
-const quotaProgress = document.getElementById("quotaProgress");
-const quotaExpire = document.getElementById("quotaExpire");
+// Subscription cards in "Управление подписками": traffic used of the limit
+// and the end date, from the panel's subscription-userinfo header.
+const subscriptionQuotaList = document.getElementById("subscriptionQuotaList");
+const subscriptionQuotaSlot = document.getElementById("subscriptionQuotaSlot");
 
-function renderQuota() {
-  const item = subscriptionStore.activeItems(subscriptionState)
-    .find(entry => entry.total || entry.upload || entry.download || entry.expire);
-  quotaCard.hidden = !item;
-  if (!item) return;
+function hasQuota(item) {
+  return Boolean(item && (item.total || item.upload || item.download || item.expire));
+}
+
+function quotaCard(item, showTitle) {
   const used = (item.upload || 0) + (item.download || 0);
   const total = item.total || 0;
   const unlimited = total === 0;
   const share = unlimited ? 1 : Math.min(1, used / total);
-  quotaTitle.textContent = item.title || subscriptionStore.displayHost(item.url);
-  quotaValue.textContent = unlimited ? `${used ? `${formatBytes(used)} · ` : ""}без лимита` : `${formatBytes(used)} из ${formatBytes(total)}`;
-  quotaProgress.style.transform = `scaleX(${share})`;
-  quotaProgress.classList.toggle("unlimited", unlimited);
-  quotaProgress.classList.toggle("warning", !unlimited && share >= .85 && share < 1);
-  quotaProgress.classList.toggle("exhausted", !unlimited && share >= 1);
-  quotaExpire.classList.remove("warning", "expired");
+  const card = document.createElement("section");
+  card.className = "quota-card";
+  card.setAttribute("aria-label", "Остаток подписки");
+  const row = document.createElement("div");
+  row.className = "quota-row";
+  const title = document.createElement("span");
+  title.textContent = showTitle ? subscriptionDisplayName(item) : "Трафик";
+  const value = document.createElement("b");
+  value.textContent = unlimited ? `${used ? `${formatBytes(used)} · ` : ""}без лимита` : `${formatBytes(used)} из ${formatBytes(total)}`;
+  row.append(title, value);
+  const track = document.createElement("div");
+  track.className = "quota-track";
+  const bar = document.createElement("i");
+  bar.classList.toggle("unlimited", unlimited);
+  bar.classList.toggle("warning", !unlimited && share >= .85 && share < 1);
+  bar.classList.toggle("exhausted", !unlimited && share >= 1);
+  track.append(bar);
+  const expire = document.createElement("small");
   if (!item.expire) {
-    quotaExpire.textContent = "Без срока действия";
-    return;
-  }
-  const endsAt = new Date(item.expire * 1000);
-  const date = endsAt.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
-  const daysLeft = Math.ceil((endsAt.getTime() - Date.now()) / 86400000);
-  if (daysLeft <= 0) {
-    quotaExpire.textContent = `Подписка истекла ${date}`;
-    quotaExpire.classList.add("expired");
-  } else if (daysLeft <= 3) {
-    quotaExpire.textContent = `Осталось ${daysLeft} ${daysLeft === 1 ? "день" : "дня"} · до ${date}`;
-    quotaExpire.classList.add("warning");
+    expire.textContent = "Без срока действия";
   } else {
-    quotaExpire.textContent = `Действует до ${date}`;
+    const endsAt = new Date(item.expire * 1000);
+    const date = endsAt.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+    const daysLeft = Math.ceil((endsAt.getTime() - Date.now()) / 86400000);
+    if (daysLeft <= 0) {
+      expire.textContent = `Подписка истекла ${date}`;
+      expire.classList.add("expired");
+    } else if (daysLeft <= 3) {
+      expire.textContent = `Осталось ${daysLeft} ${daysLeft === 1 ? "день" : "дня"} · до ${date}`;
+      expire.classList.add("warning");
+    } else {
+      expire.textContent = `Действует до ${date}`;
+    }
   }
+  card.append(row, track, expire);
+  // The bar grows in from empty once the card is on screen.
+  window.requestAnimationFrame(() => window.requestAnimationFrame(() => { bar.style.transform = `scaleX(${share})`; }));
+  return card;
+}
+
+function renderQuota(edited) {
+  subscriptionQuotaSlot.replaceChildren(...(hasQuota(edited) ? [quotaCard(edited, false)] : []));
+  subscriptionQuotaList.replaceChildren(...(edited ? [] : subscriptionState.items.filter(hasQuota).map(item => quotaCard(item, true))));
 }
 
 function updateDNSControl() {
-  // Runs whenever the active subscriptions or their metadata change.
-  renderQuota();
   const dohSource = subscriptionStore.activeItems(subscriptionState).find(item => item.dnsDoh);
   const dohOption = dnsSelect.querySelector('option[value="subscription-doh"]');
   if (dohOption) {
@@ -1602,6 +1617,7 @@ function renderSubscriptionManager() {
   subscriptionDohInfo.textContent = edited?.dnsDoh ? new URL(edited.dnsDoh).hostname : "";
   removeSubscriptionBtn.hidden = !edited;
   saveSubscriptionBtn.textContent = edited ? "Сохранить" : "Добавить подписку";
+  renderQuota(addingSubscription ? null : edited);
   addSubscriptionBtn.disabled = requestBusy || subscriptionState.items.length >= subscriptionStore.maxSubscriptions;
 }
 

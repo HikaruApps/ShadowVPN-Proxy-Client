@@ -64,11 +64,6 @@
               <span class="menu-item-copy"><strong>Группы серверов</strong><small>Настроить серверы для Auto</small></span>
             </button>
             <div class="menu-separator" role="separator"></div>
-            <section class="quota-card" id="quotaCard" role="none" hidden aria-label="Остаток подписки">
-              <div class="quota-row"><span id="quotaTitle">Подписка</span><b id="quotaValue"></b></div>
-              <div class="quota-track"><i id="quotaProgress"></i></div>
-              <small id="quotaExpire"></small>
-            </section>
             <button class="menu-item compact" id="manageSubscriptionsBtn" type="button" role="menuitem">
               <span class="menu-item-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="M7 7h12v12H7z"/><path d="M5 16H3V3h13v2"/></svg>
@@ -408,12 +403,14 @@
             <strong>Все подписки</strong>
             <p>Серверы из всех доступных подписок объединены в одном списке.</p>
             <small>Чтобы изменить ссылку или показать серверы только одной подписки, выберите её слева.</small>
+            <div class="quota-list" id="subscriptionQuotaList"></div>
           </div>
           <form id="subscriptionEditorForm" novalidate>
             <div class="subscription-editor-heading">
               <strong id="subscriptionEditorTitle">Новая подписка</strong>
               <small id="subscriptionEditorHint">Добавьте HTTPS-ссылку</small>
             </div>
+            <div class="quota-list" id="subscriptionQuotaSlot"></div>
             <label for="managedSubscriptionUrl">Ссылка на подписку</label>
             <input id="managedSubscriptionUrl" type="url" placeholder="https://cloud.example.com/…" autocomplete="off" spellcheck="false" aria-describedby="managedSubscriptionError" />
             <p class="subscription-editor-error" id="managedSubscriptionError" role="alert"></p>

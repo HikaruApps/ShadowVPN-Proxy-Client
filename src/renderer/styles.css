@@ -1437,9 +1437,13 @@ button:disabled { cursor: wait; opacity: .65; }
   .server-ping.pending { animation: none !important; }
 }
 
-/* Subscription card in the main menu, above "Управление подписками": traffic
-   used of the limit and the end date, from the subscription-userinfo header. */
-.quota-card { margin: 6px 6px 4px; padding: 11px 13px 12px; border: 1px solid #222; border-radius: 12px; background: #0f0f0f; }
+/* Subscription cards in "Управление подписками": traffic used of the limit
+   and the end date, from the subscription-userinfo header. */
+.quota-list { display: flex; flex-direction: column; gap: 8px; }
+.quota-list:empty { display: none; }
+.subscription-scope-overview .quota-list { width: 100%; max-height: 220px; margin-top: 6px; overflow-y: auto; }
+#subscriptionQuotaSlot { margin: 12px 0 14px; }
+.quota-card { padding: 11px 13px 12px; border: 1px solid #222; border-radius: 12px; background: #0f0f0f; animation: card-reveal 320ms var(--motion) both; }
 .quota-card[hidden] { display: none; }
 .quota-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 12px; line-height: 1.2; }
 .quota-row span { min-width: 0; overflow: hidden; color: #9a9a9a; text-overflow: ellipsis; white-space: nowrap; }
