@@ -1443,7 +1443,7 @@ button:disabled { cursor: wait; opacity: .65; }
 /* The top bar follows the page columns, so the card starts exactly at the
    divider of the server list and fills the space up to the menu button. */
 .topbar { display: grid; grid-template-columns: subgrid; align-items: center; }
-.topbar-actions { min-width: 0; align-items: center; margin-left: calc(-1 * var(--col-gap)); }
+.topbar-actions { min-width: 0; align-items: center; margin-left: calc(-1 * var(--col-gap) + 14px); }
 .topbar-actions .menu-anchor { margin-left: auto; }
 .quota-card { flex: 1 1 auto; min-width: 0; padding: 11px 15px 12px; border: 1px solid #222; border-radius: 12px; background: #0d0d0d; animation: location-reveal 420ms var(--motion) both; }
 .quota-card[hidden] { display: none; }
