@@ -47,7 +47,8 @@ body {
   grid-template-columns: clamp(320px, 45vw, 410px) minmax(0, 1fr);
   grid-template-rows: 40px minmax(0, 1fr);
   grid-template-areas: "topbar topbar" "servers connect";
-  gap: 28px clamp(24px, 3.5vw, 38px);
+  --col-gap: clamp(24px, 3.5vw, 38px);
+  gap: 28px var(--col-gap);
   padding: 28px 24px 24px;
 }
 
@@ -1295,7 +1296,7 @@ button:disabled { cursor: wait; opacity: .65; }
 @media (max-width: 780px) {
   .app {
     grid-template-columns: 320px minmax(0, 1fr);
-    column-gap: 20px;
+    --col-gap: 20px;
     padding-inline: 20px;
   }
 
@@ -1439,21 +1440,24 @@ button:disabled { cursor: wait; opacity: .65; }
 
 /* Subscription card in the top bar: traffic used of the limit and the end
    date, from the panel's subscription-userinfo header. */
-.topbar-actions { align-items: center; }
-.quota-card { width: 236px; padding: 7px 12px 8px; border: 1px solid #222; border-radius: 12px; background: #0d0d0d; animation: location-reveal 420ms var(--motion) both; }
+/* The top bar follows the page columns, so the card starts exactly at the
+   divider of the server list and fills the space up to the menu button. */
+.topbar { display: grid; grid-template-columns: subgrid; align-items: center; }
+.topbar-actions { min-width: 0; align-items: center; margin-left: calc(-1 * var(--col-gap)); }
+.topbar-actions .menu-anchor { margin-left: auto; }
+.quota-card { flex: 1 1 auto; min-width: 0; padding: 11px 15px 12px; border: 1px solid #222; border-radius: 12px; background: #0d0d0d; animation: location-reveal 420ms var(--motion) both; }
 .quota-card[hidden] { display: none; }
-.quota-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 11px; line-height: 1.2; }
+.quota-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 12px; line-height: 1.2; }
 .quota-row span { min-width: 0; overflow: hidden; color: #9a9a9a; text-overflow: ellipsis; white-space: nowrap; }
 .quota-row b { flex: 0 0 auto; color: #dedede; font-weight: 550; font-variant-numeric: tabular-nums; }
-.quota-track { position: relative; height: 3px; margin-top: 6px; overflow: hidden; border-radius: 2px; background: #222; }
+.quota-track { position: relative; height: 4px; margin-top: 8px; overflow: hidden; border-radius: 2px; background: #222; }
 .quota-track i { position: absolute; inset: 0; border-radius: inherit; background: #d6d6d6; transform: scaleX(0); transform-origin: left center; transition: transform 600ms var(--motion), background 300ms ease; }
 .quota-track i.unlimited { transform: scaleX(1) !important; background: #3a3a3a; }
 .quota-track i.warning { background: var(--warn); }
 .quota-track i.exhausted { background: var(--bad); }
-.quota-card small { display: block; margin-top: 5px; color: #6f6f6f; font-size: 10px; line-height: 1.2; }
+.quota-card small { display: block; margin-top: 7px; color: #6f6f6f; font-size: 11px; line-height: 1.2; }
 .quota-card small.warning { color: var(--warn); }
 .quota-card small.expired { color: var(--bad); }
-@media (max-width: 860px) { .quota-card { width: 188px; } }
 
 /* Connection check: a verdict and the four steps a connection needs. */
 .diagnostics-panel { width: min(520px, 100%); max-height: calc(100vh - 56px); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid #2b2b2b; border-radius: 20px; background: #0d0d0d; box-shadow: 0 28px 90px rgba(0, 0, 0, .72), inset 0 1px 0 rgba(255, 255, 255, .035); animation: logs-reveal 420ms var(--motion); }
