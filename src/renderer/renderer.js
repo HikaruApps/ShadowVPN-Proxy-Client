@@ -3,6 +3,8 @@ let requestBusy = false;
 
 const powerBtn = document.getElementById("powerBtn");
 const statusText = document.getElementById("statusText");
+const pingPill = document.getElementById("pingPill");
+const pingPillValue = document.getElementById("pingPillValue");
 const serverList = document.getElementById("serverList");
 const pingBtn = document.getElementById("pingBtn");
 const sortBtn = document.getElementById("sortBtn");
@@ -164,7 +166,16 @@ const STATUS_LABEL = {
   disconnecting: "Отключение…",
 };
 
+// One-shot render hints: cards slide in after a new list, sort or category;
+// pings that just came back land with a small overshoot.
+let revealNextRender = false;
+let arrivedPingIds = new Set();
+
 function renderServerList() {
+  const reveal = revealNextRender && !reducedMotion();
+  const arrived = arrivedPingIds;
+  revealNextRender = false;
+  arrivedPingIds = new Set();
   serverList.replaceChildren();
   const visibleProfiles = filterServerProfiles(serverProfiles, selectedCategory);
   if (currentState === "disconnected" && !visibleProfiles.some(profile => profile.id === selectedGroupId)) {
@@ -177,10 +188,12 @@ function renderServerList() {
     serverList.append(empty);
     return;
   }
-  for (const profile of sortServerProfiles(visibleProfiles, pingResults, selectedSort)) {
+  for (const [index, profile] of sortServerProfiles(visibleProfiles, pingResults, selectedSort).entries()) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "server-card";
+    card.style.setProperty("--i", String(Math.min(index, 12)));
+    if (reveal) card.classList.add("reveal");
     card.classList.toggle("auto-card", Boolean(profile.auto));
     card.dataset.groupId = profile.id;
     card.classList.toggle("selected", profile.id === selectedGroupId);
@@ -232,6 +245,7 @@ function renderServerList() {
     } else {
       ping.textContent = "—";
     }
+    if (result && result !== "pending" && arrived.has(profile.id)) ping.classList.add("arrived");
     text.append(name, meta); card.append(icon, text, ping);
     card.addEventListener("click", () => {
       if (requestBusy || currentState === "connecting" || currentState === "disconnecting") return;
@@ -243,6 +257,87 @@ function renderServerList() {
     });
     serverList.append(card);
   }
+  updatePingPill(arrived.size > 0);
+}
+
+function reducedMotion() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+// Status text fades through: the old line fades out, the new one fades in with
+// a slight grow. Many places assign textContent, so the element's own setter
+// is wrapped instead of touching each of them.
+(() => {
+  const native = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
+  let shown = native.get.call(statusText);
+  let pending = null;
+  let fading = null;
+  Object.defineProperty(statusText, "textContent", {
+    configurable: true,
+    get: () => pending ?? shown,
+    set(value) {
+      const next = String(value ?? "");
+      if (next === (pending ?? shown)) return;
+      if (reducedMotion() || !statusText.isConnected) {
+        pending = null; shown = next; native.set.call(statusText, next); return;
+      }
+      pending = next;
+      if (fading) return;
+      fading = statusText.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: "ease-in", fill: "forwards" });
+      fading.finished.catch(() => {}).then(() => {
+        fading = null;
+        if (pending === null) return;
+        shown = pending; pending = null;
+        native.set.call(statusText, shown);
+        statusText.animate(
+          [{ opacity: 0, transform: "scale(.94)" }, { opacity: 1, transform: "scale(1)" }],
+          { duration: 260, easing: "cubic-bezier(.16, 1, .3, 1)", fill: "forwards" },
+        );
+      });
+    },
+  });
+})();
+
+// The block under the button changes height as the IP, location and traffic
+// come and go; the frame follows it smoothly so the button glides instead of jumping.
+(() => {
+  const frame = document.getElementById("connectionCopyFrame");
+  const content = document.getElementById("connectionCopy");
+  if (!frame || !content || typeof ResizeObserver !== "function") return;
+  new ResizeObserver(() => { frame.style.height = `${content.offsetHeight}px`; }).observe(content);
+})();
+
+// Latency of the server in use, shown under the status while connected.
+let activeProfileId = "";
+function updatePingPill(arrived = false) {
+  const visible = currentState === "connected";
+  pingPill.hidden = !visible;
+  if (!visible) return;
+  const result = pingResults.get(activeProfileId) ?? pingResults.get(selectedGroupId);
+  pingPill.classList.remove("good", "slow", "critical", "unavailable", "pending", "arrived");
+  if (result === "pending") {
+    pingPillValue.textContent = "Проверяем…";
+    pingPill.classList.add("pending");
+  } else if (result?.available) {
+    pingPillValue.textContent = `${result.latencyMs} мс`;
+    pingPill.classList.add(result.latencyMs >= 250 ? "critical" : result.latencyMs >= 120 ? "slow" : "good");
+  } else if (result) {
+    pingPillValue.textContent = "Нет ответа";
+    pingPill.classList.add("unavailable");
+  } else {
+    pingPillValue.textContent = "Проверить";
+  }
+  if (arrived && result && result !== "pending") {
+    void pingPill.offsetWidth;
+    pingPill.classList.add("arrived");
+  }
+}
+
+function flashPowerError() {
+  powerBtn.classList.remove("error");
+  void powerBtn.offsetWidth;
+  powerBtn.classList.add("error");
+  window.setTimeout(() => powerBtn.classList.remove("error"), 1800);
 }
 
 function updateCategoryControl() {
@@ -292,6 +387,7 @@ function setIpText(label, value, mode = "") {
 }
 
 function clearConnectedLocation() {
+  activeProfileId = "";
   connectedLocation.hidden = true;
   connectedLocationFlag.replaceChildren();
   connectedLocationFlag.classList.remove("country-flag");
@@ -300,6 +396,8 @@ function clearConnectedLocation() {
 
 function setConnectedLocation(profile) {
   if (!profile?.name) return clearConnectedLocation();
+  activeProfileId = profile.profileId || "";
+  updatePingPill();
   const display = serverFlagAndName(profile.name);
   connectedLocationFlag.replaceChildren();
   connectedLocationFlag.classList.remove("country-flag");
@@ -448,9 +546,9 @@ function applyState(state) {
   dashboard.dataset.vpnState = state;
   statusText.textContent = STATUS_LABEL[state] ?? state;
 
-  powerBtn.classList.remove("connected", "connecting");
-  if (state === "connected") powerBtn.classList.add("connected");
-  if (state === "connecting" || state === "disconnecting") powerBtn.classList.add("connecting");
+  powerBtn.classList.remove("connected", "connecting", "disconnecting");
+  if (state === "connected" || state === "connecting" || state === "disconnecting") powerBtn.classList.add(state);
+  powerBtn.setAttribute("aria-label", state === "connected" ? "Отключить VPN" : "Подключить VPN");
   if (state !== "connected") clearConnectedLocation();
 
   if (state === "connecting") {
@@ -491,6 +589,7 @@ function applyState(state) {
     disconnecting: "Туннель закрывается",
   }[state] || "Диагностика активна";
   updatePingButton();
+  updatePingPill();
 }
 
 function updatePingButton() {
@@ -949,6 +1048,7 @@ async function changeConnection(action = "toggle") {
         : await window.vpnApi.connect(selectedGroupId, selectedDNS, customDNSServers, fragmentationEnabled, killSwitchEnabled, selectedAutoProfileIds, selectedRoutingMode, directDomains, geoData.geoIPURL, geoData.geoSiteURL, subscriptionDoh);
     if (!reply.ok) {
       statusText.textContent = reply.error;
+      if (!disconnecting) flashPowerError();
     } else if (!disconnecting) {
       setConnectedLocation(reply.result);
       void loadProtectedIp();
@@ -981,6 +1081,7 @@ async function runPingTest() {
     if (!reply.ok) throw new Error(reply.error);
     for (const result of reply.result) pingResults.set(result.id, result);
     refreshAutoPingForGroup();
+    arrivedPingIds = new Set(serverProfiles.map(profile => profile.id));
     renderServerList();
     const realResults = reply.result.filter(result => !serverProfiles.find(profile => profile.id === result.id)?.auto);
     const available = realResults.filter(result => result.available).length;
@@ -998,6 +1099,7 @@ async function runPingTest() {
 }
 
 pingBtn.addEventListener("click", runPingTest);
+pingPill.addEventListener("click", () => void runPingTest());
 
 window.vpnApi.onStateChange(applyPushedState);
 window.vpnApi.onProfileChange(applyAutoProfileChange);
@@ -1154,6 +1256,7 @@ function applyImportedProfiles(imported, previousSelection = selectedGroupId) {
   groupState = groupStore.writeState(groupState);
   selectedGroupId = serverProfiles.some(profile => profile.id === previousSelection) ? previousSelection : serverProfiles[0].id;
   pingResults.clear();
+  revealNextRender = true;
   renderServerList();
 }
 
@@ -1572,6 +1675,7 @@ sortMenu.addEventListener("click", event => {
   try { localStorage.setItem(sortStorageKey, selectedSort); } catch { /* Keep it for this session. */ }
   setSortMenuOpen(false);
   updateSortControl();
+  revealNextRender = true;
   renderServerList();
   const hasResults = [...pingResults.values()].some(result => result && result !== "pending");
   if (selectedSort === "latency" && !hasResults) void runPingTest();
@@ -1581,6 +1685,7 @@ serverCategoryTabs.addEventListener("click", event => {
   if (!tab || !categoryLabels.has(tab.dataset.serverCategory)) return;
   selectedCategory = tab.dataset.serverCategory;
   updateCategoryControl();
+  revealNextRender = true;
   renderServerList();
   updatePingButton();
   if (currentState === "disconnected" && !requestBusy) {
